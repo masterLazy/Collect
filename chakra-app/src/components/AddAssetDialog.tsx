@@ -13,13 +13,13 @@ import {
     VStack,
 } from "@chakra-ui/react"
 import { api } from "../services/api"
-import { createToaster } from "@chakra-ui/react"
+import type { CustomToaster } from "./CustomToast"
 import type { DirectoryNode, UploadResult } from "../types"
 
 interface AddAssetDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
-    toaster: ReturnType<typeof createToaster>
+    toaster: CustomToaster
     onAssetsAdded: () => void
 }
 
@@ -176,7 +176,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, onAssetsAdded }: A
 
         setUploading(true)
         try {
-            const result: UploadResult = await api.uploadAssets(readyFiles, targetDir, true)
+            const result: UploadResult = await api.uploadAssets(readyFiles, targetDir)
             toaster.create({
                 title: "Upload complete",
                 description: result.added + " file(s) added" + (result.errors.length > 0 ? ", " + result.errors.length + " error(s)" : ""),

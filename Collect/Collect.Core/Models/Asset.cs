@@ -2,12 +2,12 @@ namespace Collect.Core.Models;
 
 /// <summary>
 /// Represents a multimedia asset in the library.
+/// Asset state is derived entirely from the filesystem; no JSON persistence.
 /// </summary>
 public class Asset
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string FileName { get; set; } = string.Empty;
-    public string StorageFileName { get; set; } = string.Empty;
     public string RelativePath { get; set; } = string.Empty;
     public long FileSize { get; set; }
     public int Width { get; set; }
@@ -16,7 +16,6 @@ public class Asset
     public List<AssetTag> Tags { get; set; } = new();
     public DateTime ImportedAt { get; set; } = DateTime.UtcNow;
     public DateTime? LastModified { get; set; }
-    public string? Md5Hash { get; set; }
 }
 
 /// <summary>

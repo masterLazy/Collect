@@ -17,7 +17,6 @@ export interface AssetDto {
 export interface AssetDetailDto {
     id: string;
     fileName: string;
-    storageFileName: string;
     relativePath: string;
     fileSize: number;
     width: number;
@@ -47,11 +46,10 @@ export interface TagGroupsResponse {
 }
 
 export interface LibraryInfo {
+    id: string;
     name: string;
     path: string;
-    totalAssets: number;
-    useMd5: boolean;
-    parseTags: boolean;
+    assetCount: number;
 }
 
 export interface DirectoryNode {
@@ -73,4 +71,32 @@ export interface UploadResult {
 export interface UploadError {
     fileName: string;
     reason: string;
+}
+
+export interface ServerDrive {
+    name: string;
+    path: string;
+    label: string;
+}
+
+export interface ServerDirEntry {
+    name: string;
+    path: string;
+}
+
+export interface ServerBrowseResponse {
+    path: string;
+    dirs: ServerDirEntry[];
+}
+
+export interface TagConflict {
+    tagValue: string;
+    possibleTypes: string[];
+}
+
+export interface ScanResult {
+    added: number;
+    removed: number;
+    total: number;
+    tagConflicts: TagConflict[];
 }

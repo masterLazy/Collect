@@ -99,4 +99,83 @@ public class ThumbnailService : IThumbnailService
 
         return thumbnailLastWrite >= sourceLastWrite;
     }
+
+    /// <summary>
+    /// Get or create a thumbnail for the given source file, keyed by its relative path + metadata.
+    /// If a thumbnail already exists and is up-to-date, returns its path without regenerating.
+    /// Uses file size + last-write time (not content hash) as the key — avoids reading file content.
+    /// </summary>
+    public string? GetOrCreateContentHashThumbnail(string libraryPath, string sourceFilePath)
+    {
+        if (!File.Exists(sourceFilePath))
+            return null;
+
+        var thumbDir = Path.Combine(libraryPath, ".collect", "thumbnails");
+        Directory.CreateDirectory(thumbDir);
+
+        var thumbPath = ComputeThumbnailPath(libraryPath, sourceFilePath);
+
+        if (File.Exists(thumbPath))
+            return thumbPath;
+
+        return TryGenerateThumbnail(sourceFilePath, thumbPath) ? thumbPath : null;
+    }
+
+    /// <summary>
+    /// Delete the thumbnail for a given source file path, if it exists.
+    /// </summary>
+    public void DeleteThumbnail(string libraryPath, string sourceFilePath)
+    {
+        var thumbPath = ComputeThumbnailPath(libraryPath, sourceFilePath);
+        if (File.Exists(thumbPath))
+            File.Delete(thumbPath);
+    }
+
+    /// <summary>
+    /// Delete all thumbnail files in the library's thumbnail directory that do not
+    /// correspond to any current asset's source file. Call after scan to prevent
+    /// orphaned thumbnails from accumulating when files are renamed or deleted externally.
+    /// </summary>
+    public void CleanupOrphanedThumbnails(string libraryPath, IEnumerable<string> currentAssetFilePaths)
+    {
+        var thumbDir = Path.Combine(libraryPath, ".collect", "thumbnails");
+        if (!Directory.Exists(thumbDir))
+            return;
+
+        // Build the set of expected thumbnail filenames for all current assets
+        var expectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var filePath in currentAssetFilePaths)
+        {
+            var thumbPath = ComputeThumbnailPath(libraryPath, filePath);
+            expectedNames.Add(Path.GetFileName(thumbPath));
+        }
+
+        // Delete any .webp file in the thumbnail directory not in the expected set
+        foreach (var thumbFile in Directory.EnumerateFiles(thumbDir, "*.webp"))
+        {
+            var fileName = Path.GetFileName(thumbFile);
+            if (!expectedNames.Contains(fileName))
+            {
+                try
+                {
+                    File.Delete(thumbFile);
+                }
+                catch (Exception ex)
+                {
+                    // Log and continue — one failure should not stop cleanup
+                    Console.Error.WriteLine($"Failed to delete orphaned thumbnail {thumbFile}: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    private static string ComputeThumbnailPath(string libraryPath, string sourceFilePath)
+    {
+        var thumbDir = Path.Combine(libraryPath, ".collect", "thumbnails");
+        var fileInfo = new FileInfo(sourceFilePath);
+        var key = sourceFilePath.ToLowerInvariant() + "|" + fileInfo.Length + "|" + fileInfo.LastWriteTimeUtc.Ticks;
+        var hash = Convert.ToHexString(System.Security.Cryptography.MD5.HashData(
+            System.Text.Encoding.UTF8.GetBytes(key))).ToLowerInvariant();
+        return Path.Combine(thumbDir, $"{hash}.webp");
+    }
 }

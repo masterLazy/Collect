@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using Collect.Core.Dtos;
 using Collect.Core.Models;
@@ -8,15 +7,10 @@ namespace Collect.Core.Services;
 
 /// <summary>
 /// Implements asset CRUD, scanning, tag parsing, search, and thumbnail management.
-/// Persistence is via a JSON file in .collect/assets.json.
+/// Asset state is derived entirely from the filesystem on each scan; no JSON persistence.
 /// </summary>
 public partial class AssetService : IAssetService
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true
-    };
-
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"
@@ -27,11 +21,16 @@ public partial class AssetService : IAssetService
 
     private readonly ILibraryService _libraryService;
     private readonly IThumbnailService _thumbnailService;
+    private readonly ILogger<AssetService> _logger;
+    private readonly SemaphoreSlim _semaphore = new(1, 1);
 
-    public AssetService(ILibraryService libraryService, IThumbnailService thumbnailService)
+    private List<Asset> _assets = new();
+
+    public AssetService(ILibraryService libraryService, IThumbnailService thumbnailService, ILogger<AssetService> logger)
     {
         _libraryService = libraryService;
         _thumbnailService = thumbnailService;
+        _logger = logger;
     }
 
     // ──────────────────────────────────────────────
@@ -99,126 +98,81 @@ public partial class AssetService : IAssetService
             throw new InvalidOperationException("Library not initialized. Call /api/library/init first.");
 
         var collectDir = Path.Combine(libraryPath, ".collect");
-        var assetsPath = Path.Combine(collectDir, "assets.json");
-        var libraryInfoPath = Path.Combine(collectDir, "library.json");
 
-        // Read library info to get useMd5 and parseTags flags
-        var useMd5 = false;
-        var parseTags = true;
-        if (File.Exists(libraryInfoPath))
+        await _semaphore.WaitAsync();
+        try
         {
-            var libInfo = JsonSerializer.Deserialize<LibraryInfo>(await File.ReadAllTextAsync(libraryInfoPath), JsonOptions);
-            if (libInfo is not null)
+            var newAssets = new List<Asset>();
+            var added = 0;
+            var scannedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // Recursively find image files
+            var files = Directory.EnumerateFiles(libraryPath, "*.*", SearchOption.AllDirectories)
+                .Where(f => !f.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase)
+                    && ImageExtensions.Contains(Path.GetExtension(f)));
+
+            foreach (var filePath in files)
             {
-                useMd5 = libInfo.UseMd5;
-                parseTags = libInfo.ParseTags;
-            }
-        }
+                var relativePath = Path.GetRelativePath(libraryPath, filePath);
+                scannedPaths.Add(relativePath);
 
-        var store = File.Exists(assetsPath)
-            ? JsonSerializer.Deserialize<AssetsStore>(await File.ReadAllTextAsync(assetsPath), JsonOptions) ?? new AssetsStore()
-            : new AssetsStore();
+                var existing = _assets.FirstOrDefault(a =>
+                    a.RelativePath.Equals(relativePath, StringComparison.OrdinalIgnoreCase));
 
-        var existingAssets = new Dictionary<string, Asset>(StringComparer.OrdinalIgnoreCase);
-        foreach (var asset in store.Assets)
-        {
-            existingAssets[asset.RelativePath] = asset;
-        }
-
-        var scannedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var added = 0;
-
-        // Recursively find image files
-        var files = Directory.EnumerateFiles(libraryPath, "*.*", SearchOption.AllDirectories)
-            .Where(f => !f.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase) && ImageExtensions.Contains(Path.GetExtension(f)));
-
-        foreach (var filePath in files)
-        {
-            // Handle MD5 rename before creating relative path
-            var effectivePath = filePath;
-            if (useMd5)
-            {
-                var fileName = Path.GetFileNameWithoutExtension(filePath);
-                // Only rename if name doesn't look like an MD5 hash (32 hex chars)
-                if (fileName.Length != 32 || fileName.Any(c => !Uri.IsHexDigit(c)))
+                if (existing is not null)
                 {
-                    var md5 = CalculateMd5(filePath);
-                    var ext = Path.GetExtension(filePath);
-                    var dir = Path.GetDirectoryName(filePath)!;
-                    var newFileName = md5 + ext;
-                    var newPath = Path.Combine(dir, newFileName);
-
-                    if (!filePath.Equals(newPath, StringComparison.OrdinalIgnoreCase))
+                    // Update metadata if file has been modified
+                    var lastWrite = File.GetLastWriteTimeUtc(filePath);
+                    if (existing.LastModified is null || existing.LastModified.Value != lastWrite)
                     {
-                        File.Move(filePath, newPath);
-                        effectivePath = newPath;
+                        UpdateAssetMetadata(existing, filePath, relativePath);
+                        existing.LastModified = lastWrite;
                     }
+                    newAssets.Add(existing);
+                }
+                else
+                {
+                    // New asset
+                    var asset = CreateAssetFromFile(filePath, relativePath);
+                    newAssets.Add(asset);
+                    added++;
+
+                    // Generate thumbnail for new asset (deduplicated by content hash)
+                    _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, filePath);
                 }
             }
 
-            var relativePath = Path.GetRelativePath(libraryPath, effectivePath);
-            scannedPaths.Add(relativePath);
+            var removed = _assets.Count - newAssets.Count;
+            _assets = newAssets;
 
-            if (existingAssets.TryGetValue(relativePath, out var existing))
+            // Clean up orphaned thumbnails (from renamed/deleted files)
+            var currentFilePaths = _assets.Select(a => Path.Combine(libraryPath, a.RelativePath)).ToList();
+            _thumbnailService.CleanupOrphanedThumbnails(libraryPath, currentFilePaths);
+
+            // ──────────────────────────────────────────────
+            //  Tag normalization: auto-add type prefix for tags
+            //  that exist both with and without a type
+            // ──────────────────────────────────────────────
+            var tagConflicts = await NormalizeTagsAsync();
+
+            // Update AssetCount in library.json
+            await _libraryService.UpdateAssetCountAsync(_assets.Count);
+
+            return new ScanResult
             {
-                // Check if file has been modified
-                var lastWrite = File.GetLastWriteTimeUtc(effectivePath);
-                if (existing.LastModified is null || existing.LastModified.Value != lastWrite)
-                {
-                    UpdateAssetMetadata(existing, effectivePath, relativePath);
-                    existing.LastModified = lastWrite;
-                }
-
-                // Update MD5 hash if needed
-                if (useMd5 && string.IsNullOrEmpty(existing.Md5Hash))
-                {
-                    existing.Md5Hash = CalculateMd5(effectivePath);
-                }
-            }
-            else
-            {
-                // New asset
-                var asset = CreateAssetFromFile(effectivePath, relativePath, parseTags);
-                if (useMd5)
-                {
-                    asset.Md5Hash = CalculateMd5(effectivePath);
-                }
-                store.Assets.Add(asset);
-                added++;
-
-                // Generate thumbnail for new asset
-                var thumbDir = Path.Combine(collectDir, "thumbnails");
-                var thumbPath = Path.Combine(thumbDir, $"{asset.Id}.webp");
-                _thumbnailService.TryGenerateThumbnail(effectivePath, thumbPath);
-            }
+                Added = added,
+                Removed = removed,
+                Total = _assets.Count,
+                TagConflicts = tagConflicts
+            };
         }
-
-        // Remove assets whose files no longer exist
-        var removed = store.Assets.RemoveAll(a => !scannedPaths.Contains(a.RelativePath));
-
-        // Persist
-        await File.WriteAllTextAsync(assetsPath, JsonSerializer.Serialize(store, JsonOptions));
-
-        // Update library info
-        if (File.Exists(libraryInfoPath))
+        finally
         {
-            var info = JsonSerializer.Deserialize<LibraryInfo>(await File.ReadAllTextAsync(libraryInfoPath), JsonOptions);
-            if (info is not null)
-            {
-                info.AssetCount = store.Assets.Count;
-                await File.WriteAllTextAsync(libraryInfoPath, JsonSerializer.Serialize(info, JsonOptions));
-            }
+            _semaphore.Release();
         }
-
-        return new ScanResult
-        {
-            Added = added,
-            Removed = removed,
-            Total = store.Assets.Count
-        };
     }
 
-    private static Asset CreateAssetFromFile(string filePath, string relativePath, bool parseTags = true)
+    private static Asset CreateAssetFromFile(string filePath, string relativePath)
     {
         var fileInfo = new FileInfo(filePath);
         var nameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
@@ -227,13 +181,12 @@ public partial class AssetService : IAssetService
         {
             Id = Guid.NewGuid().ToString("N"),
             FileName = fileInfo.Name,
-            StorageFileName = fileInfo.Name,
             RelativePath = relativePath,
             FileSize = fileInfo.Length,
             MimeType = GetMimeType(filePath),
             ImportedAt = DateTime.UtcNow,
             LastModified = fileInfo.LastWriteTimeUtc,
-            Tags = parseTags ? ParseTags(nameWithoutExt) : new List<AssetTag>()
+            Tags = ParseTags(nameWithoutExt)
         };
 
         // Try to get image dimensions using SkiaSharp
@@ -285,20 +238,40 @@ public partial class AssetService : IAssetService
     //  Read / List / Detail
     // ──────────────────────────────────────────────
 
-    public async Task<PaginatedResponse<AssetDto>> GetAssetsAsync(int page, int pageSize, string sort, string? folder = null)
+    public async Task<PaginatedResponse<AssetDto>> GetAssetsAsync(int page, int pageSize, string sort, string? folder = null, bool subfolders = true)
     {
-        var store = await LoadStoreAsync();
-        if (store is null)
-            return new PaginatedResponse<AssetDto>();
+        await EnsureScannedAsync();
 
-        var filtered = store.Assets.AsEnumerable();
+        var filtered = _assets.AsEnumerable();
 
-        // Filter by folder prefix if provided
+        // Filter by folder
         if (!string.IsNullOrEmpty(folder))
         {
-            var folderPrefix = folder.Replace('\\', '/').TrimEnd('/') + "/";
-            filtered = filtered.Where(a =>
-                a.RelativePath.StartsWith(folderPrefix, StringComparison.OrdinalIgnoreCase));
+            if (folder == "__root__")
+            {
+                // Root: assets with no directory separator in their relative path
+                filtered = filtered.Where(a =>
+                    !a.RelativePath.Contains(Path.DirectorySeparatorChar) &&
+                    !a.RelativePath.Contains(Path.AltDirectorySeparatorChar));
+            }
+            else if (subfolders)
+            {
+                // Recursive mode: all files under the folder prefix
+                var folderPrefix = folder.Replace('\\', '/').TrimEnd('/') + "/";
+                filtered = filtered.Where(a =>
+                    a.RelativePath.Replace('\\', '/').StartsWith(folderPrefix, StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                // Non-recursive: only files directly in this folder (no subdirectories)
+                var normalizedFolder = folder.Replace('\\', '/').TrimEnd('/');
+                filtered = filtered.Where(a =>
+                {
+                    var rel = a.RelativePath.Replace('\\', '/');
+                    var dir = Path.GetDirectoryName(rel)?.Replace('\\', '/') ?? "";
+                    return string.Equals(dir, normalizedFolder, StringComparison.OrdinalIgnoreCase);
+                });
+            }
         }
 
         var assets = sort switch
@@ -327,17 +300,21 @@ public partial class AssetService : IAssetService
 
     public async Task<AssetDetailDto?> GetAssetDetailAsync(string id)
     {
-        var store = await LoadStoreAsync();
-        if (store is null) return null;
-
-        var asset = store.Assets.FirstOrDefault(a => a.Id == id);
+        await EnsureScannedAsync();
+        var asset = _assets.FirstOrDefault(a => a.Id == id);
         return asset is null ? null : MapToDetailDto(asset);
     }
 
     public async Task<Asset?> GetAssetAsync(string id)
     {
-        var store = await LoadStoreAsync();
-        return store?.Assets.FirstOrDefault(a => a.Id == id);
+        await EnsureScannedAsync();
+        return _assets.FirstOrDefault(a => a.Id == id);
+    }
+
+    public async Task<List<Asset>> GetAllAssetsAsync()
+    {
+        await EnsureScannedAsync();
+        return _assets;
     }
 
     // ──────────────────────────────────────────────
@@ -346,32 +323,191 @@ public partial class AssetService : IAssetService
 
     public async Task<bool> UpdateTagsAsync(string id, List<AssetTag> tags)
     {
-        var libraryPath = _libraryService.GetLibraryPath();
-        if (libraryPath is null) return false;
+        await EnsureScannedAsync();
 
-        var assetsPath = Path.Combine(libraryPath, ".collect", "assets.json");
-        var store = await LoadStoreAsync();
-        if (store is null) return false;
+        await _semaphore.WaitAsync();
+        try
+        {
+            var asset = _assets.FirstOrDefault(a => a.Id == id);
+            if (asset is null) return false;
 
-        var asset = store.Assets.FirstOrDefault(a => a.Id == id);
-        if (asset is null) return false;
+            var libraryPath = _libraryService.GetLibraryPath();
+            if (libraryPath is null) return false;
 
-        asset.Tags = tags;
-        await File.WriteAllTextAsync(assetsPath, JsonSerializer.Serialize(store, JsonOptions));
-        return true;
+            // Reorder: categorized tags before uncategorized tags
+            tags = ReorderTags(tags);
+
+            var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
+            var oldExt = Path.GetExtension(asset.FileName);
+
+            // Build new filename from tags
+            var newFileName = BuildFileNameFromTags(tags, oldExt);
+            var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+            var newRelativePath = string.IsNullOrEmpty(oldDir) ? newFileName : oldDir + Path.DirectorySeparatorChar + newFileName;
+            var newFilePath = Path.Combine(libraryPath, newRelativePath);
+
+            // Only rename if the filename actually changed
+            if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                // If current filename already has a disambiguation suffix, skip rename
+                if (HasDisambiguationSuffix(asset.FileName, newFileName))
+                {
+                    // Already has suffix, no rename needed for tag-based name
+                }
+                else if (!File.Exists(newFilePath))
+                {
+                    // No collision, rename directly
+                    _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                    File.Move(oldFilePath, newFilePath);
+                    asset.FileName = newFileName;
+                    asset.RelativePath = newRelativePath;
+                }
+                else
+                {
+                    // Collision: try numeric suffixes
+                    var baseWithoutExt = Path.GetFileNameWithoutExtension(newFileName);
+                    bool found = false;
+                    for (int i = 1; i <= 999; i++)
+                    {
+                        var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
+                        var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
+                        var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
+                        if (!File.Exists(suffixedPath))
+                        {
+                            try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                            try
+                            {
+                                File.Move(oldFilePath, suffixedPath);
+                                asset.FileName = suffixedName;
+                                asset.RelativePath = suffixedRelPath;
+                                found = true;
+                                break;
+                            }
+                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { break; }
+                        }
+                    }
+                    if (!found)
+                        return false;
+                }
+            }
+
+            asset.Tags = tags;
+            return true;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reorder tags so that categorized tags (with a type) come before uncategorized tags.
+    /// Categorized tags are sorted by their type name, then by their value.
+    /// Uncategorized tags maintain their original relative order.
+    /// Returns the original list reference if already in order.
+    /// </summary>
+    private static List<AssetTag> ReorderTags(List<AssetTag> tags)
+    {
+        var categorized = tags.Where(t => t.Type != null)
+            .OrderBy(t => t.Type, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(t => t.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var uncategorized = tags.Where(t => t.Type == null).ToList();
+        if (categorized.Count == 0 || uncategorized.Count == 0)
+            return tags;
+
+        // Check if already in order (all categorized before all uncategorized, sorted by type)
+        bool alreadyOrdered = true;
+        int catIdx = 0;
+        foreach (var tag in tags)
+        {
+            if (tag.Type == null)
+            {
+                // All categorized should come before any uncategorized
+                // Once we see an uncategorized, the rest must be uncategorized
+                break;
+            }
+            else
+            {
+                // Check that this categorized tag matches the expected sorted order
+                if (catIdx < categorized.Count &&
+                    (!string.Equals(tag.Type, categorized[catIdx].Type, StringComparison.OrdinalIgnoreCase) ||
+                     !string.Equals(tag.Value, categorized[catIdx].Value, StringComparison.OrdinalIgnoreCase)))
+                {
+                    alreadyOrdered = false;
+                    break;
+                }
+                catIdx++;
+            }
+        }
+        // Also verify no categorized tags appear after uncategorized
+        if (alreadyOrdered)
+        {
+            bool seenUncategorized = false;
+            foreach (var tag in tags)
+            {
+                if (tag.Type == null)
+                    seenUncategorized = true;
+                else if (seenUncategorized)
+                {
+                    alreadyOrdered = false;
+                    break;
+                }
+            }
+        }
+        if (alreadyOrdered && catIdx == categorized.Count)
+            return tags;
+
+        var reordered = new List<AssetTag>(categorized.Count + uncategorized.Count);
+        reordered.AddRange(categorized);
+        reordered.AddRange(uncategorized);
+        return reordered;
+    }
+
+    private static string BuildFileNameFromTags(List<AssetTag> tags, string extension)
+    {
+        var segments = new List<string>();
+        foreach (var tag in tags)
+        {
+            var segment = tag.Type is not null ? $"[{tag.Type}]{tag.Value}" : tag.Value;
+            segments.Add(segment);
+        }
+        return string.Join("-", segments) + extension;
+    }
+
+    /// <summary>
+    /// Check if a filename differs from another only by a numeric disambiguation suffix
+    /// (e.g., "tag-01.jpg" vs "tag.jpg" → true; "tag-other.jpg" vs "tag.jpg" → false)
+    /// </summary>
+    private static bool HasDisambiguationSuffix(string currentFileName, string baseFileName)
+    {
+        var currentWithoutExt = Path.GetFileNameWithoutExtension(currentFileName);
+        var baseWithoutExt = Path.GetFileNameWithoutExtension(baseFileName);
+        if (currentWithoutExt.Length <= baseWithoutExt.Length)
+            return false;
+        if (!currentWithoutExt.StartsWith(baseWithoutExt, StringComparison.OrdinalIgnoreCase))
+            return false;
+        var suffix = currentWithoutExt.Substring(baseWithoutExt.Length);
+        return suffix.Length >= 3 && suffix[0] == '-' && suffix.Substring(1).All(char.IsDigit);
     }
 
     // ──────────────────────────────────────────────
     //  Search
     // ──────────────────────────────────────────────
 
-    public async Task<PaginatedResponse<AssetDto>> SearchAsync(string query, int page, int pageSize)
+    public async Task<PaginatedResponse<AssetDto>> SearchAsync(string query, int page, int pageSize, string? folder = null)
     {
-        var store = await LoadStoreAsync();
-        if (store is null)
-            return new PaginatedResponse<AssetDto>();
+        await EnsureScannedAsync();
 
-        IEnumerable<Asset> results = store.Assets;
+        IEnumerable<Asset> results = _assets;
+
+        // Filter by folder prefix if provided
+        if (!string.IsNullOrEmpty(folder))
+        {
+            var folderPrefix = folder.Replace('\\', '/').TrimEnd('/') + "/";
+            results = results.Where(a =>
+                a.RelativePath.Replace('\\', '/').StartsWith(folderPrefix, StringComparison.OrdinalIgnoreCase));
+        }
 
         // Parse query for tags: prefix
         var tagMatch = System.Text.RegularExpressions.Regex.Match(query, @"tags:(\S+)");
@@ -425,83 +561,142 @@ public partial class AssetService : IAssetService
         ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"
     };
 
-    public async Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir, bool parseTags)
+    public async Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir)
     {
         var libraryPath = _libraryService.GetLibraryPath();
         if (libraryPath is null)
             throw new InvalidOperationException("Library not initialized.");
 
+        await EnsureScannedAsync();
+
         var result = new UploadResult();
-        var collectDir = Path.Combine(libraryPath, ".collect");
-        var assetsPath = Path.Combine(collectDir, "assets.json");
-
-        var store = File.Exists(assetsPath)
-            ? JsonSerializer.Deserialize<AssetsStore>(await File.ReadAllTextAsync(assetsPath), JsonOptions) ?? new AssetsStore()
-            : new AssetsStore();
-
         var targetPath = Path.Combine(libraryPath, targetDir);
         Directory.CreateDirectory(targetPath);
 
-        foreach (var file in files)
+        await _semaphore.WaitAsync();
+        try
         {
-            var ext = Path.GetExtension(file.FileName);
-            if (!AllowedUploadExtensions.Contains(ext))
+            foreach (var file in files)
             {
-                result.Errors.Add(new UploadError
+                var ext = Path.GetExtension(file.FileName);
+                if (!AllowedUploadExtensions.Contains(ext))
                 {
-                    FileName = file.FileName,
-                    Reason = $"Unsupported file type '{ext}'. Allowed: {string.Join(", ", AllowedUploadExtensions)}"
-                });
-                continue;
-            }
-
-            try
-            {
-                // Determine unique file name
-                var destFileName = file.FileName;
-                var destPath = Path.Combine(targetPath, destFileName);
-                var counter = 1;
-
-                while (File.Exists(destPath))
-                {
-                    var nameWithoutExt = Path.GetFileNameWithoutExtension(file.FileName);
-                    destFileName = $"{nameWithoutExt}_({counter}){ext}";
-                    destPath = Path.Combine(targetPath, destFileName);
-                    counter++;
+                    result.Errors.Add(new UploadError
+                    {
+                        FileName = file.FileName,
+                        Reason = $"Unsupported file type '{ext}'. Allowed: {string.Join(", ", AllowedUploadExtensions)}"
+                    });
+                    continue;
                 }
 
-                // Save file
-                await using (var stream = new FileStream(destPath, FileMode.Create))
+                try
                 {
-                    await file.CopyToAsync(stream);
+                    // Determine unique file name
+                    var destFileName = file.FileName;
+                    var destPath = Path.Combine(targetPath, destFileName);
+                    var counter = 1;
+
+                    while (File.Exists(destPath))
+                    {
+                        var nameWithoutExt = Path.GetFileNameWithoutExtension(file.FileName);
+                        destFileName = $"{nameWithoutExt}_({counter}){ext}";
+                        destPath = Path.Combine(targetPath, destFileName);
+                        counter++;
+                    }
+
+                    // Save file
+                    await using (var stream = new FileStream(destPath, FileMode.Create))
+                    {
+                        await file.CopyToAsync(stream);
+                    }
+
+                    // Create asset entry
+                    var relativePath = Path.GetRelativePath(libraryPath, destPath);
+                    var asset = CreateAssetFromFile(destPath, relativePath);
+
+                    _assets.Add(asset);
+                    result.Added++;
+
+                    // Generate thumbnail (deduplicated by content hash)
+                    _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, destPath);
                 }
-
-                // Create asset entry
-                var relativePath = Path.GetRelativePath(libraryPath, destPath);
-                var asset = CreateAssetFromFile(destPath, relativePath, parseTags);
-
-                store.Assets.Add(asset);
-                result.Added++;
-
-                // Generate thumbnail
-                var thumbDir = Path.Combine(collectDir, "thumbnails");
-                var thumbPath = Path.Combine(thumbDir, $"{asset.Id}.webp");
-                _thumbnailService.TryGenerateThumbnail(destPath, thumbPath);
-            }
-            catch (Exception ex)
-            {
-                result.Errors.Add(new UploadError
+                catch (Exception ex)
                 {
-                    FileName = file.FileName,
-                    Reason = ex.Message
-                });
+                    result.Errors.Add(new UploadError
+                    {
+                        FileName = file.FileName,
+                        Reason = ex.Message
+                    });
+                }
             }
         }
+        finally
+        {
+            _semaphore.Release();
+        }
 
-        // Persist store
-        await File.WriteAllTextAsync(assetsPath, JsonSerializer.Serialize(store, JsonOptions));
+        // Update AssetCount in library.json
+        await _libraryService.UpdateAssetCountAsync(_assets.Count);
 
         return result;
+    }
+
+    // ──────────────────────────────────────────────
+    //  Move Asset
+    // ──────────────────────────────────────────────
+
+    public async Task<AssetDetailDto?> MoveAssetAsync(string id, string targetFolder)
+    {
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return null;
+
+        await EnsureScannedAsync();
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            var asset = _assets.FirstOrDefault(a => a.Id == id);
+            if (asset is null) return null;
+
+            var oldRelativeDir = Path.GetDirectoryName(asset.RelativePath.Replace('\\', '/')) ?? "";
+            var targetDir = string.IsNullOrEmpty(targetFolder) ? "" : targetFolder.Replace('\\', '/').Trim('/');
+
+            // No-op if already in the target folder
+            if (string.Equals(oldRelativeDir, targetDir, StringComparison.OrdinalIgnoreCase))
+                return MapToDetailDto(asset);
+
+            var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
+            var fileName = Path.GetFileName(asset.RelativePath);
+
+            // Determine new path
+            var newRelativePath = string.IsNullOrEmpty(targetDir) ? fileName : targetDir.Replace('/', Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar + fileName;
+            var newFilePath = Path.Combine(libraryPath, newRelativePath);
+
+            // Handle name collision
+            if (File.Exists(newFilePath))
+                return null;
+
+            // Ensure target directory exists
+            var targetFullDir = Path.GetDirectoryName(newFilePath)!;
+            if (!Directory.Exists(targetFullDir))
+                Directory.CreateDirectory(targetFullDir);
+
+            // Delete old thumbnail before moving
+            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+
+            // Move file on disk
+            File.Move(oldFilePath, newFilePath);
+
+            // Update asset metadata (under lock so ScanAsync doesn't interfere)
+            asset.RelativePath = newRelativePath;
+            asset.FileName = fileName;
+
+            return MapToDetailDto(asset);
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
     }
 
     // ──────────────────────────────────────────────
@@ -513,16 +708,66 @@ public partial class AssetService : IAssetService
         var libraryPath = _libraryService.GetLibraryPath();
         if (libraryPath is null) return null;
 
-        // Load directly from file to avoid stale in-memory state
-        var assetsPath = Path.Combine(libraryPath, ".collect", "assets.json");
-        if (!File.Exists(assetsPath)) return null;
-
-        var json = File.ReadAllText(assetsPath);
-        var store = JsonSerializer.Deserialize<AssetsStore>(json);
-        var asset = store?.Assets.FirstOrDefault(a => a.Id == id);
+        var asset = _assets.FirstOrDefault(a => a.Id == id);
         if (asset is null) return null;
 
         return Path.Combine(libraryPath, asset.RelativePath);
+    }
+
+    // ──────────────────────────────────────────────
+    //  Clipboard Image
+    // ──────────────────────────────────────────────
+
+    public async Task<byte[]?> GetClipboardImageAsync(string id)
+    {
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return null;
+
+        var asset = await GetAssetAsync(id);
+        if (asset is null) return null;
+
+        var filePath = Path.Combine(libraryPath, asset.RelativePath);
+        if (!File.Exists(filePath)) return null;
+
+        try
+        {
+            using var input = File.OpenRead(filePath);
+            using var codec = SKCodec.Create(input);
+            if (codec is null) return null;
+
+            var info = codec.Info;
+            var maxDim = Math.Max(info.Width, info.Height);
+
+            using var original = SKBitmap.Decode(codec);
+            if (original is null) return null;
+
+            SKBitmap? finalBitmap;
+            if (maxDim > 2000)
+            {
+                float scale = 2000f / maxDim;
+                int newWidth = Math.Max(1, (int)(info.Width * scale));
+                int newHeight = Math.Max(1, (int)(info.Height * scale));
+                finalBitmap = original.Resize(new SKSizeI(newWidth, newHeight), new SKSamplingOptions(SKFilterMode.Linear));
+                if (finalBitmap is null) return null;
+            }
+            else
+            {
+                finalBitmap = original;
+            }
+
+            using var image = SKImage.FromBitmap(finalBitmap);
+            using var data = image.Encode(SKEncodedImageFormat.Png, 100);
+            var bytes = data.ToArray();
+
+            if (finalBitmap != original)
+                finalBitmap.Dispose();
+
+            return bytes;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public async Task<string?> GetThumbnailPathAsync(string id)
@@ -537,36 +782,214 @@ public partial class AssetService : IAssetService
         if (!File.Exists(sourcePath))
             return null;
 
-        var thumbDir = Path.Combine(libraryPath, ".collect", "thumbnails");
-        var thumbPath = Path.Combine(thumbDir, $"{id}.webp");
-
-        // Check if thumbnail is valid (exists and up-to-date)
-        var thumbValid = File.Exists(thumbPath) &&
-            File.GetLastWriteTimeUtc(thumbPath) >= File.GetLastWriteTimeUtc(sourcePath);
-
-        if (!thumbValid)
-        {
-            if (!_thumbnailService.TryGenerateThumbnail(sourcePath, thumbPath))
-                return null;
-        }
-
-        return thumbPath;
+        return _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, sourcePath);
     }
 
     // ──────────────────────────────────────────────
     //  Helpers
     // ──────────────────────────────────────────────
 
-    private async Task<AssetsStore?> LoadStoreAsync()
+    /// <summary>
+    /// Auto-convert untyped tags that have a matching typed tag elsewhere,
+    /// reorder tags (categorized first), and rename files on disk.
+    /// Returns a list of unresolved conflicts (values with multiple possible types).
+    /// </summary>
+    private async Task<List<TagConflict>> NormalizeTagsAsync()
+    {
+        var tagConflicts = new List<TagConflict>();
+
+        // Build map: value_lowercase → set<type> from all assets
+        var valueToTypes = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var asset in _assets)
+        {
+            foreach (var tag in asset.Tags)
+            {
+                if (tag.Type != null)
+                {
+                    if (!valueToTypes.ContainsKey(tag.Value))
+                        valueToTypes[tag.Value] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    valueToTypes[tag.Value].Add(tag.Type);
+                }
+            }
+        }
+
+        // Record conflicts for values with multiple possible types
+        foreach (var kvp in valueToTypes)
+        {
+            if (kvp.Value.Count > 1)
+            {
+                tagConflicts.Add(new TagConflict
+                {
+                    TagValue = kvp.Key,
+                    PossibleTypes = kvp.Value.OrderBy(t => t).ToList()
+                });
+            }
+        }
+
+        // Auto-convert untyped tags and reorder
+        var libraryPathForRename = _libraryService.GetLibraryPath();
+        foreach (var asset in _assets)
+        {
+            // Save original tags so we can revert if file rename fails
+            var originalTags = asset.Tags.Select(t => new AssetTag { Type = t.Type, Value = t.Value }).ToList();
+
+            for (int i = 0; i < asset.Tags.Count; i++)
+            {
+                var tag = asset.Tags[i];
+                if (tag.Type != null) continue;
+                if (!valueToTypes.TryGetValue(tag.Value, out var types)) continue;
+                if (types.Count != 1) continue;
+
+                // Auto-convert: exactly one possible type
+                asset.Tags[i] = new AssetTag { Type = types.First(), Value = tag.Value };
+            }
+
+            // Reorder: categorized tags before uncategorized tags, sorted by type name
+            var reordered = ReorderTags(asset.Tags);
+            if (!ReferenceEquals(reordered, asset.Tags))
+                asset.Tags = reordered;
+
+            // Always try to persist the current tag order to the filename,
+            // even if only the order changed (no type changes).
+            // This ensures sorted tags are reflected on disk.
+            if (libraryPathForRename != null)
+            {
+                var oldFilePath = Path.Combine(libraryPathForRename, asset.RelativePath);
+                var oldExt = Path.GetExtension(asset.FileName);
+                var newFileName = BuildFileNameFromTags(asset.Tags, oldExt);
+                var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+                var newRelativePath = string.IsNullOrEmpty(oldDir) ? newFileName : oldDir + Path.DirectorySeparatorChar + newFileName;
+                var newFilePath = Path.Combine(libraryPathForRename, newRelativePath);
+
+                _logger.LogDebug(
+                    "[NormalizeTagsAsync] Asset {AssetId}: oldFileName={OldFile}, newFileName={NewFile}, " +
+                    "oldFilePath={OldPath}, newFilePath={NewPath}, " +
+                    "fileNameEquals={FileNameEquals}, targetExists={TargetExists}",
+                    asset.Id, asset.FileName, newFileName,
+                    oldFilePath, newFilePath,
+                    string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase),
+                    File.Exists(newFilePath));
+
+                if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    // If current filename already has a disambiguation suffix, skip rename
+                    if (HasDisambiguationSuffix(asset.FileName, newFileName))
+                    {
+                        _logger.LogTrace(
+                            "[NormalizeTagsAsync] Asset {AssetId}: fileName {FileName} already has a disambiguation suffix for {NewFile}, skipping rename.",
+                            asset.Id, asset.FileName, newFileName);
+                    }
+                    else if (!File.Exists(newFilePath))
+                    {
+                        // No collision, rename directly
+                        try
+                        {
+                            _thumbnailService.DeleteThumbnail(libraryPathForRename, oldFilePath);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex,
+                                "[NormalizeTagsAsync] DeleteThumbnail failed for asset {AssetId}: {OldPath}. Continuing with rename.",
+                                asset.Id, oldFilePath);
+                        }
+                        try
+                        {
+                            File.Move(oldFilePath, newFilePath);
+                            _logger.LogInformation(
+                                "[NormalizeTagsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {NewFile}",
+                                asset.Id, asset.FileName, newFileName);
+                            asset.FileName = newFileName;
+                            asset.RelativePath = newRelativePath;
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            _logger.LogError(ex,
+                                "[NormalizeTagsAsync] File.Move failed for asset {AssetId}: {OldPath} -> {NewPath}. Reverting tags.",
+                                asset.Id, oldFilePath, newFilePath);
+                            // Revert in-memory tags to match disk state
+                            asset.Tags = originalTags;
+                        }
+                    }
+                    else
+                    {
+                        // Collision: try numeric suffixes
+                        var baseWithoutExt = Path.GetFileNameWithoutExtension(newFileName);
+                        bool found = false;
+                        for (int i = 1; i <= 999; i++)
+                        {
+                            var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
+                            var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
+                            var suffixedPath = Path.Combine(libraryPathForRename, suffixedRelPath);
+                            if (!File.Exists(suffixedPath))
+                            {
+                                try { _thumbnailService.DeleteThumbnail(libraryPathForRename, oldFilePath); } catch { }
+                                try
+                                {
+                                    File.Move(oldFilePath, suffixedPath);
+                                    _logger.LogInformation(
+                                        "[NormalizeTagsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {SuffixedName}",
+                                        asset.Id, asset.FileName, suffixedName);
+                                    asset.FileName = suffixedName;
+                                    asset.RelativePath = suffixedRelPath;
+                                    found = true;
+                                    break;
+                                }
+                                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                                {
+                                    _logger.LogError(ex,
+                                        "[NormalizeTagsAsync] File.Move failed for asset {AssetId}: {OldPath} -> {SuffixedPath}. Reverting tags.",
+                                        asset.Id, oldFilePath, suffixedPath);
+                                    break;
+                                }
+                            }
+                        }
+                        if (!found)
+                        {
+                            _logger.LogWarning(
+                                "[NormalizeTagsAsync] Could not find unique suffixed name for asset {AssetId}: {NewPath}. Reverting tags.",
+                                asset.Id, newFilePath);
+                            // Could not find a unique name — revert in-memory tags to match disk
+                            asset.Tags = originalTags;
+                        }
+                    }
+                }
+                else
+                {
+                    _logger.LogTrace(
+                        "[NormalizeTagsAsync] No rename needed for asset {AssetId}: fileName already matches.",
+                        asset.Id);
+                }
+            }
+        }
+
+        return tagConflicts;
+    }
+
+    private async Task EnsureScannedAsync()
     {
         var libraryPath = _libraryService.GetLibraryPath();
-        if (libraryPath is null) return null;
+        if (libraryPath is null) return;
 
-        var assetsPath = Path.Combine(libraryPath, ".collect", "assets.json");
-        if (!File.Exists(assetsPath)) return null;
+        var collectDir = Path.Combine(libraryPath, ".collect");
 
-        var json = await File.ReadAllTextAsync(assetsPath);
-        return JsonSerializer.Deserialize<AssetsStore>(json, JsonOptions);
+        if (_assets.Count == 0)
+        {
+            await ScanAsync();
+            return;
+        }
+
+        // Lightweight check: count image files on disk and compare with in-memory count.
+        // This catches files added externally (e.g. manual copy) without a full scan every time.
+        var diskCount = Directory.EnumerateFiles(libraryPath, "*.*", SearchOption.AllDirectories)
+            .Count(f => !f.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase)
+                && ImageExtensions.Contains(Path.GetExtension(f)));
+        if (diskCount != _assets.Count)
+        {
+            await ScanAsync();
+        }
+        // else: disk count matches, nothing to do
+        // NormalizeTagsAsync is only called from ScanAsync to avoid infinite retry
+        // loops when tag auto-conversion causes filename collisions on disk.
     }
 
     private AssetDto MapToDto(Asset asset)
@@ -590,7 +1013,6 @@ public partial class AssetService : IAssetService
         {
             Id = asset.Id,
             FileName = asset.FileName,
-            StorageFileName = asset.StorageFileName,
             RelativePath = asset.RelativePath,
             FileSize = asset.FileSize,
             Width = asset.Width,
@@ -604,10 +1026,624 @@ public partial class AssetService : IAssetService
         };
     }
 
-    private static string CalculateMd5(string filePath)
+    public async Task<List<TagConflict>> GetTagConflictsAsync()
     {
-        using var stream = File.OpenRead(filePath);
-        return Convert.ToHexString(System.Security.Cryptography.MD5.HashData(stream)).ToLowerInvariant();
+        await EnsureScannedAsync();
+
+        // After normalization, check for any remaining conflicts
+        var valueToTypes = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var asset in _assets)
+        {
+            foreach (var tag in asset.Tags)
+            {
+                if (tag.Type != null)
+                {
+                    if (!valueToTypes.ContainsKey(tag.Value))
+                        valueToTypes[tag.Value] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    valueToTypes[tag.Value].Add(tag.Type);
+                }
+            }
+        }
+
+        var conflicts = new List<TagConflict>();
+        foreach (var kvp in valueToTypes)
+        {
+            if (kvp.Value.Count > 1)
+            {
+                conflicts.Add(new TagConflict
+                {
+                    TagValue = kvp.Key,
+                    PossibleTypes = kvp.Value.OrderBy(t => t).ToList()
+                });
+            }
+        }
+
+        return conflicts;
+    }
+
+    public async Task<bool> ResolveTagConflictsAsync(List<TagConflictResolution> resolutions)
+    {
+        await _semaphore.WaitAsync();
+        try
+        {
+            foreach (var resolution in resolutions)
+            {
+                foreach (var asset in _assets)
+                {
+                    // Save original tags to revert if rename fails
+                    var originalTags = asset.Tags.Select(t => new AssetTag { Type = t.Type, Value = t.Value }).ToList();
+
+                    bool tagsChanged = false;
+                    for (int i = 0; i < asset.Tags.Count; i++)
+                    {
+                        var tag = asset.Tags[i];
+                        // Update ALL tags with this value to the chosen type,
+                        // regardless of whether they already have a type (or a different one)
+                        if (!string.Equals(tag.Value, resolution.TagValue, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        if (string.Equals(tag.Type, resolution.ChosenType, StringComparison.OrdinalIgnoreCase))
+                            continue; // already has the chosen type, skip
+
+                        asset.Tags[i] = new AssetTag { Type = resolution.ChosenType, Value = tag.Value };
+                        tagsChanged = true;
+                    }
+
+                    if (tagsChanged)
+                    {
+                        // Reorder: categorized tags before uncategorized tags
+                        var reordered = ReorderTags(asset.Tags);
+                        if (!ReferenceEquals(reordered, asset.Tags))
+                            asset.Tags = reordered;
+
+                        var libraryPath = _libraryService.GetLibraryPath();
+                        if (libraryPath == null)
+                        {
+                            asset.Tags = originalTags;
+                            continue;
+                        }
+
+                        var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
+                        var oldExt = Path.GetExtension(asset.FileName);
+                        var newFileName = BuildFileNameFromTags(asset.Tags, oldExt);
+                        var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+                        var newRelativePath = string.IsNullOrEmpty(oldDir)
+                            ? newFileName
+                            : oldDir + Path.DirectorySeparatorChar + newFileName;
+                        var newFilePath = Path.Combine(libraryPath, newRelativePath);
+
+                        _logger.LogDebug(
+                            "[ResolveTagConflictsAsync] Asset {AssetId}: oldFileName={OldFile}, newFileName={NewFile}, " +
+                            "oldFilePath={OldPath}, newFilePath={NewPath}, " +
+                            "fileNameEquals={FileNameEquals}, targetExists={TargetExists}",
+                            asset.Id, asset.FileName, newFileName,
+                            oldFilePath, newFilePath,
+                            string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase),
+                            File.Exists(newFilePath));
+
+                        if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            // If current filename already has a disambiguation suffix, skip rename
+                            if (HasDisambiguationSuffix(asset.FileName, newFileName))
+                            {
+                                _logger.LogTrace(
+                                    "[ResolveTagConflictsAsync] Asset {AssetId}: fileName {FileName} already has a disambiguation suffix for {NewFile}, skipping rename.",
+                                    asset.Id, asset.FileName, newFileName);
+                            }
+                            else if (!File.Exists(newFilePath))
+                            {
+                                // No collision, rename directly
+                                try
+                                {
+                                    _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex,
+                                        "[ResolveTagConflictsAsync] DeleteThumbnail failed for asset {AssetId}: {OldPath}. Continuing with rename.",
+                                        asset.Id, oldFilePath);
+                                }
+                                try
+                                {
+                                    File.Move(oldFilePath, newFilePath);
+                                    _logger.LogInformation(
+                                        "[ResolveTagConflictsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {NewFile}",
+                                        asset.Id, asset.FileName, newFileName);
+                                    asset.FileName = newFileName;
+                                    asset.RelativePath = newRelativePath;
+                                }
+                                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                                {
+                                    _logger.LogError(ex,
+                                        "[ResolveTagConflictsAsync] File.Move failed for asset {AssetId}: {OldPath} -> {NewPath}. Reverting tags.",
+                                        asset.Id, oldFilePath, newFilePath);
+                                    // Revert in-memory tags to match disk state
+                                    asset.Tags = originalTags;
+                                }
+                            }
+                            else
+                            {
+                                // Collision: try numeric suffixes
+                                var baseWithoutExt = Path.GetFileNameWithoutExtension(newFileName);
+                                bool found = false;
+                                for (int i = 1; i <= 999; i++)
+                                {
+                                    var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
+                                    var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
+                                    var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
+                                    if (!File.Exists(suffixedPath))
+                                    {
+                                        try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                                        try
+                                        {
+                                            File.Move(oldFilePath, suffixedPath);
+                                            _logger.LogInformation(
+                                                "[ResolveTagConflictsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {SuffixedName}",
+                                                asset.Id, asset.FileName, suffixedName);
+                                            asset.FileName = suffixedName;
+                                            asset.RelativePath = suffixedRelPath;
+                                            found = true;
+                                            break;
+                                        }
+                                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                                        {
+                                            _logger.LogError(ex,
+                                                "[ResolveTagConflictsAsync] File.Move failed for asset {AssetId}: {OldPath} -> {SuffixedPath}. Reverting tags.",
+                                                asset.Id, oldFilePath, suffixedPath);
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!found)
+                                {
+                                    _logger.LogWarning(
+                                        "[ResolveTagConflictsAsync] Could not find unique suffixed name for asset {AssetId}: {NewPath}. Reverting tags.",
+                                        asset.Id, newFilePath);
+                                    // Could not find a unique name — revert in-memory tags to match disk
+                                    asset.Tags = originalTags;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogTrace(
+                                "[ResolveTagConflictsAsync] No rename needed for asset {AssetId}: fileName already matches.",
+                                asset.Id);
+                        }
+                    }
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public async Task<int> CategorizeTagsAsync(BatchCategorizeRequest request)
+    {
+        // Don't call EnsureScannedAsync() here — that would trigger NormalizeTagsAsync
+        // which auto-converts tags and renames files. Then we'd run our own rename on top,
+        // causing potential double-rename issues. Instead, scan directly if empty.
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return 0;
+
+        if (_assets.Count == 0)
+            await ScanAsync();
+
+        var affectedAssetIds = new HashSet<string>();
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            foreach (var change in request.Changes)
+            {
+                foreach (var asset in _assets)
+                {
+                    // Save original tags to revert if rename fails
+                    var originalTags = asset.Tags.Select(t => new AssetTag { Type = t.Type, Value = t.Value }).ToList();
+
+                    bool tagsChanged = false;
+                    for (int i = 0; i < asset.Tags.Count; i++)
+                    {
+                        var tag = asset.Tags[i];
+                        if (!string.Equals(tag.Value, change.TagValue, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        if (string.Equals(tag.Type, change.NewType, StringComparison.OrdinalIgnoreCase))
+                            continue; // already has the target type, skip
+
+                        asset.Tags[i] = new AssetTag { Type = change.NewType, Value = tag.Value };
+                        tagsChanged = true;
+                    }
+
+                    if (tagsChanged)
+                    {
+                        affectedAssetIds.Add(asset.Id);
+
+                        // Reorder: categorized tags before uncategorized tags
+                        var reordered = ReorderTags(asset.Tags);
+                        if (!ReferenceEquals(reordered, asset.Tags))
+                            asset.Tags = reordered;
+
+                        var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
+                        var oldExt = Path.GetExtension(asset.FileName);
+                        var newFileName = BuildFileNameFromTags(asset.Tags, oldExt);
+                        var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+                        var newRelativePath = string.IsNullOrEmpty(oldDir)
+                            ? newFileName
+                            : oldDir + Path.DirectorySeparatorChar + newFileName;
+                        var newFilePath = Path.Combine(libraryPath, newRelativePath);
+
+                        _logger.LogDebug(
+                            "[CategorizeTagsAsync] Asset {AssetId}: oldFileName={OldFile}, newFileName={NewFile}, " +
+                            "oldFilePath={OldPath}, newFilePath={NewPath}, " +
+                            "fileNameEquals={FileNameEquals}, targetExists={TargetExists}",
+                            asset.Id, asset.FileName, newFileName,
+                            oldFilePath, newFilePath,
+                            string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase),
+                            File.Exists(newFilePath));
+
+                        if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            // If current filename already has a disambiguation suffix, skip rename
+                            if (HasDisambiguationSuffix(asset.FileName, newFileName))
+                            {
+                                _logger.LogTrace(
+                                    "[CategorizeTagsAsync] Asset {AssetId}: fileName {FileName} already has a disambiguation suffix for {NewFile}, skipping rename.",
+                                    asset.Id, asset.FileName, newFileName);
+                            }
+                            else if (!File.Exists(newFilePath))
+                            {
+                                // No collision, rename directly
+                                try
+                                {
+                                    _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex,
+                                        "[CategorizeTagsAsync] DeleteThumbnail failed for asset {AssetId}: {OldPath}. Continuing with rename.",
+                                        asset.Id, oldFilePath);
+                                }
+                                try
+                                {
+                                    File.Move(oldFilePath, newFilePath);
+                                    _logger.LogInformation(
+                                        "[CategorizeTagsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {NewFile}",
+                                        asset.Id, asset.FileName, newFileName);
+                                    asset.FileName = newFileName;
+                                    asset.RelativePath = newRelativePath;
+                                }
+                                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                                {
+                                    _logger.LogError(ex,
+                                        "[CategorizeTagsAsync] File.Move failed for asset {AssetId}: {OldPath} -> {NewPath}. Reverting tags.",
+                                        asset.Id, oldFilePath, newFilePath);
+                                    // Revert in-memory tags to match disk state
+                                    asset.Tags = originalTags;
+                                }
+                            }
+                            else
+                            {
+                                // Collision: try numeric suffixes
+                                var baseWithoutExt = Path.GetFileNameWithoutExtension(newFileName);
+                                bool found = false;
+                                for (int i = 1; i <= 999; i++)
+                                {
+                                    var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
+                                    var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
+                                    var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
+                                    if (!File.Exists(suffixedPath))
+                                    {
+                                        try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                                        try
+                                        {
+                                            File.Move(oldFilePath, suffixedPath);
+                                            _logger.LogInformation(
+                                                "[CategorizeTagsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {SuffixedName}",
+                                                asset.Id, asset.FileName, suffixedName);
+                                            asset.FileName = suffixedName;
+                                            asset.RelativePath = suffixedRelPath;
+                                            found = true;
+                                            break;
+                                        }
+                                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                                        {
+                                            _logger.LogError(ex,
+                                                "[CategorizeTagsAsync] File.Move failed for asset {AssetId}: {OldPath} -> {SuffixedPath}. Reverting tags.",
+                                                asset.Id, oldFilePath, suffixedPath);
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!found)
+                                {
+                                    _logger.LogWarning(
+                                        "[CategorizeTagsAsync] Could not find unique suffixed name for asset {AssetId}: {NewPath}. Reverting tags.",
+                                        asset.Id, newFilePath);
+                                    // Could not find a unique name — revert in-memory tags to match disk
+                                    asset.Tags = originalTags;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogTrace(
+                                "[CategorizeTagsAsync] No rename needed for asset {AssetId}: fileName already matches.",
+                                asset.Id);
+                        }
+                    }
+                }
+            }
+
+            return affectedAssetIds.Count;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    //  Bulk Category / Tag Operations
+    // ──────────────────────────────────────────────
+
+    public async Task<bool> RenameCategoryAsync(string oldType, string newType)
+    {
+        await EnsureScannedAsync();
+
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return false;
+
+        var anyModified = false;
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            foreach (var asset in _assets)
+            {
+                bool tagsChanged = false;
+                for (int i = 0; i < asset.Tags.Count; i++)
+                {
+                    var tag = asset.Tags[i];
+                    if (!string.Equals(tag.Type, oldType, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (string.Equals(tag.Type, newType, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    asset.Tags[i] = new AssetTag { Type = newType, Value = tag.Value };
+                    tagsChanged = true;
+                }
+
+                if (tagsChanged)
+                {
+                    anyModified = true;
+
+                    var reordered = ReorderTags(asset.Tags);
+                    if (!ReferenceEquals(reordered, asset.Tags))
+                        asset.Tags = reordered;
+
+                    var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
+                    var oldExt = Path.GetExtension(asset.FileName);
+                    var newFileName = BuildFileNameFromTags(asset.Tags, oldExt);
+                    var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+                    var newRelativePath = string.IsNullOrEmpty(oldDir)
+                        ? newFileName
+                        : oldDir + Path.DirectorySeparatorChar + newFileName;
+                    var newFilePath = Path.Combine(libraryPath, newRelativePath);
+
+                    if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!File.Exists(newFilePath))
+                        {
+                            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                            File.Move(oldFilePath, newFilePath);
+                            asset.FileName = newFileName;
+                            asset.RelativePath = newRelativePath;
+                        }
+                    }
+                }
+            }
+
+            return anyModified;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public async Task<bool> DeleteCategoryAsync(string type)
+    {
+        await EnsureScannedAsync();
+
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return false;
+
+        var anyModified = false;
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            foreach (var asset in _assets)
+            {
+                bool tagsChanged = false;
+                for (int i = 0; i < asset.Tags.Count; i++)
+                {
+                    var tag = asset.Tags[i];
+                    if (!string.Equals(tag.Type, type, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    // Remove the type (set to null) but keep the value
+                    asset.Tags[i] = new AssetTag { Type = null, Value = tag.Value };
+                    tagsChanged = true;
+                }
+
+                if (tagsChanged)
+                {
+                    anyModified = true;
+
+                    var reordered = ReorderTags(asset.Tags);
+                    if (!ReferenceEquals(reordered, asset.Tags))
+                        asset.Tags = reordered;
+
+                    var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
+                    var oldExt = Path.GetExtension(asset.FileName);
+                    var newFileName = BuildFileNameFromTags(asset.Tags, oldExt);
+                    var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+                    var newRelativePath = string.IsNullOrEmpty(oldDir)
+                        ? newFileName
+                        : oldDir + Path.DirectorySeparatorChar + newFileName;
+                    var newFilePath = Path.Combine(libraryPath, newRelativePath);
+
+                    if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!File.Exists(newFilePath))
+                        {
+                            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                            File.Move(oldFilePath, newFilePath);
+                            asset.FileName = newFileName;
+                            asset.RelativePath = newRelativePath;
+                        }
+                    }
+                }
+            }
+
+            return anyModified;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public async Task<bool> RenameTagValueAsync(string oldValue, string newValue)
+    {
+        await EnsureScannedAsync();
+
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return false;
+
+        var anyModified = false;
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            foreach (var asset in _assets)
+            {
+                bool tagsChanged = false;
+                for (int i = 0; i < asset.Tags.Count; i++)
+                {
+                    var tag = asset.Tags[i];
+                    if (!string.Equals(tag.Value, oldValue, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (string.Equals(tag.Value, newValue, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    asset.Tags[i] = new AssetTag { Type = tag.Type, Value = newValue };
+                    tagsChanged = true;
+                }
+
+                if (tagsChanged)
+                {
+                    anyModified = true;
+
+                    var reordered = ReorderTags(asset.Tags);
+                    if (!ReferenceEquals(reordered, asset.Tags))
+                        asset.Tags = reordered;
+
+                    var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
+                    var oldExt = Path.GetExtension(asset.FileName);
+                    var newFileName = BuildFileNameFromTags(asset.Tags, oldExt);
+                    var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+                    var newRelativePath = string.IsNullOrEmpty(oldDir)
+                        ? newFileName
+                        : oldDir + Path.DirectorySeparatorChar + newFileName;
+                    var newFilePath = Path.Combine(libraryPath, newRelativePath);
+
+                    if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!File.Exists(newFilePath))
+                        {
+                            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                            File.Move(oldFilePath, newFilePath);
+                            asset.FileName = newFileName;
+                            asset.RelativePath = newRelativePath;
+                        }
+                    }
+                }
+            }
+
+            return anyModified;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public async Task<bool> DeleteTagValueAsync(string value)
+    {
+        await EnsureScannedAsync();
+
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return false;
+
+        var anyModified = false;
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            foreach (var asset in _assets)
+            {
+                bool tagsChanged = false;
+                for (int i = asset.Tags.Count - 1; i >= 0; i--)
+                {
+                    var tag = asset.Tags[i];
+                    if (!string.Equals(tag.Value, value, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    asset.Tags.RemoveAt(i);
+                    tagsChanged = true;
+                }
+
+                if (tagsChanged)
+                {
+                    anyModified = true;
+
+                    var reordered = ReorderTags(asset.Tags);
+                    if (!ReferenceEquals(reordered, asset.Tags))
+                        asset.Tags = reordered;
+
+                    var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
+                    var oldExt = Path.GetExtension(asset.FileName);
+                    var newFileName = BuildFileNameFromTags(asset.Tags, oldExt);
+                    var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+                    var newRelativePath = string.IsNullOrEmpty(oldDir)
+                        ? newFileName
+                        : oldDir + Path.DirectorySeparatorChar + newFileName;
+                    var newFilePath = Path.Combine(libraryPath, newRelativePath);
+
+                    if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!File.Exists(newFilePath))
+                        {
+                            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                            File.Move(oldFilePath, newFilePath);
+                            asset.FileName = newFileName;
+                            asset.RelativePath = newRelativePath;
+                        }
+                    }
+                }
+            }
+
+            return anyModified;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
     }
 
     private static string GetMimeType(string filePath)

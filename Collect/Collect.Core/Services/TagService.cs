@@ -1,40 +1,28 @@
-using System.Text.Json;
 using Collect.Core.Dtos;
 using Collect.Core.Models;
 
 namespace Collect.Core.Services;
 
 /// <summary>
-/// Provides tag query operations by reading from the assets store.
+/// Provides tag query operations by aggregating from the in-memory asset store.
 /// </summary>
 public class TagService : ITagService
 {
-    private readonly ILibraryService _libraryService;
+    private readonly IAssetService _assetService;
 
-    public TagService(ILibraryService libraryService)
+    public TagService(IAssetService assetService)
     {
-        _libraryService = libraryService;
+        _assetService = assetService;
     }
 
-    public Task<TagGroupsResponse> GetTagGroupsAsync(int page = 1, int size = 50, string? search = null)
+    public async Task<TagGroupsResponse> GetTagGroupsAsync(int page = 1, int size = 50, string? search = null)
     {
-        var libraryPath = _libraryService.GetLibraryPath();
-        if (libraryPath is null)
-            return Task.FromResult(new TagGroupsResponse());
-
-        var assetsPath = Path.Combine(libraryPath, ".collect", "assets.json");
-        if (!File.Exists(assetsPath))
-            return Task.FromResult(new TagGroupsResponse());
-
-        var json = File.ReadAllText(assetsPath);
-        var store = JsonSerializer.Deserialize<AssetsStore>(json);
-        if (store is null)
-            return Task.FromResult(new TagGroupsResponse());
+        var assets = await _assetService.GetAllAssetsAsync();
 
         // Aggregate tags: count how many assets have each (type, value) pair
         var tagCounts = new Dictionary<(string? Type, string Value), int>();
 
-        foreach (var asset in store.Assets)
+        foreach (var asset in assets)
         {
             foreach (var tag in asset.Tags)
             {
@@ -78,10 +66,10 @@ public class TagService : ITagService
             })
             .ToList();
 
-        return Task.FromResult(new TagGroupsResponse
+        return new TagGroupsResponse
         {
             Groups = pagedGroups,
             TotalGroups = totalGroups
-        });
+        };
     }
 }

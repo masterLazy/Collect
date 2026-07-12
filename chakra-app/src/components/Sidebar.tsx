@@ -1,47 +1,33 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import type { CustomToaster } from "./CustomToast"
 import {
+    Badge,
     Box,
-    createToaster,
+    Button,
+    Dialog,
     HStack,
     IconButton,
     Image,
+    Portal,
     Separator,
     Skeleton,
     Stack,
     Text,
-    VStack,
 } from "@chakra-ui/react"
 import { api } from "../services/api"
 import { TagEditor } from "./TagEditor"
-import type { AssetDetailDto, AssetTag } from "../types"
+import type { AssetDetailDto, AssetTag, DirectoryNode } from "../types"
 
 const API_BASE = "http://localhost:5000"
 
 interface SidebarProps {
     assetId: string | null
     onClose: () => void
-    toaster: ReturnType<typeof createToaster>
-}
-
-const aspectRatioNames: Record<string, string> = {
-    "1": "1:1",
-    "1.33": "4:3",
-    "1.5": "3:2",
-    "1.78": "16:9",
-    "1.85": "1.85:1",
-    "2.35": "2.35:1",
-    "0.75": "3:4",
-    "0.67": "2:3",
-    "0.56": "9:16",
-    "1.6": "16:10",
-    "1.25": "5:4",
-}
-
-function getClosestAspectRatio(w: number, h: number): string {
-    if (!w || !h) return ""
-    const ratio = w / h
-    const rounded = Math.round(ratio * 100) / 100
-    return aspectRatioNames[String(rounded)] || w + ":" + h
+    toaster: CustomToaster
+    onTagClick?: (value: string) => void
+    selectedTags?: string[]
+    onTagsSaved?: (updated: AssetDetailDto) => void
+    onRefreshRequested?: () => void
 }
 
 function XIcon() {
@@ -52,12 +38,85 @@ function XIcon() {
     )
 }
 
-export function Sidebar({ assetId, onClose, toaster }: SidebarProps) {
+function CopyIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+    )
+}
+
+function TrashIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="3 6 5 6 21 6" />
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        </svg>
+    )
+}
+
+function formatSize(bytes: number): string {
+    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB"
+    if (bytes >= 1024) return (bytes / 1024).toFixed(0) + " KB"
+    return bytes + " B"
+}
+
+function formatDate(iso: string): string {
+    try {
+        return new Date(iso).toLocaleDateString(undefined, {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+        })
+    } catch {
+        return iso
+    }
+}
+
+const aspectRatioEntries: { ratio: number; text: string; label?: string }[] = [
+    { ratio: 1, text: "1 : 1", label: "Square" },
+    { ratio: 4 / 3, text: "4 : 3" },
+    { ratio: 3 / 2, text: "3 : 2" },
+    { ratio: 16 / 9, text: "16 : 9" },
+    { ratio: 21 / 9, text: "21 : 9" },
+    { ratio: 1.618, text: "1.618 : 1", label: "Golden Ratio" },
+    { ratio: 1.414, text: "1.414 : 1", label: "Silver Ratio" },
+    { ratio: 3 / 4, text: "3 : 4" },
+    { ratio: 2 / 3, text: "2 : 3" },
+    { ratio: 9 / 16, text: "9 : 16" },
+    { ratio: 16 / 10, text: "16 : 10" },
+    { ratio: 5 / 4, text: "5 : 4" },
+]
+
+function getClosestAspectRatio(w: number, h: number): { text: string; label?: string; percent: number } | null {
+    if (!w || !h) return null
+    // Always use long side / short side, so ratio >= 1
+    const raw = Math.max(w, h) / Math.min(w, h)
+    let best = aspectRatioEntries[0]
+    let minDiff = Math.abs(raw - best.ratio)
+    for (let i = 1; i < aspectRatioEntries.length; i++) {
+        const diff = Math.abs(raw - aspectRatioEntries[i].ratio)
+        if (diff < minDiff) {
+            minDiff = diff
+            best = aspectRatioEntries[i]
+        }
+    }
+    const percent = Math.min(100, Math.max(0, Math.round((1 - minDiff / best.ratio) * 100 * 10) / 10))
+    return { text: best.text, label: best.label, percent }
+}
+
+export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, onTagsSaved, onRefreshRequested }: SidebarProps) {
     const [asset, setAsset] = useState<AssetDetailDto | null>(null)
     const [loading, setLoading] = useState(false)
     const [imageLoaded, setImageLoaded] = useState(false)
     const [error, setError] = useState(false)
     const [tags, setTags] = useState<AssetTag[]>([])
+    const [copiedPath, setCopiedPath] = useState(false)
+    const [moveDialogOpen, setMoveDialogOpen] = useState(false)
+    const [moveDirTree, setMoveDirTree] = useState<DirectoryNode | null>(null)
+    const [selectedMoveTarget, setSelectedMoveTarget] = useState<string>("")
+    const [moving, setMoving] = useState(false)
 
     useEffect(() => {
         if (!assetId) {
@@ -67,6 +126,9 @@ export function Sidebar({ assetId, onClose, toaster }: SidebarProps) {
         setLoading(true)
         setError(false)
         setImageLoaded(false)
+        setCopiedPath(false)
+        setImageExpanded(false)
+        setImageOverflows(false)
         api.getAsset(assetId)
             .then((data) => {
                 setAsset(data)
@@ -80,89 +142,432 @@ export function Sidebar({ assetId, onClose, toaster }: SidebarProps) {
         setTags(newTags)
     }
 
+    const handleTagsSaved = (updated: AssetDetailDto) => {
+        setAsset(updated)
+        setTags(updated.tags)
+    }
+
+    const handleCopyPath = async () => {
+        if (!asset) return
+        try {
+            await navigator.clipboard.writeText(asset.relativePath)
+            setCopiedPath(true)
+            toaster.create({ title: "Path copied", type: "success" })
+            setTimeout(() => setCopiedPath(false), 2000)
+        } catch {
+            toaster.create({ title: "Failed to copy", type: "error" })
+        }
+    }
+
+    const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+    const [imageExpanded, setImageExpanded] = useState(false)
+    const [imageOverflows, setImageOverflows] = useState(false)
+    const [copiedImage, setCopiedImage] = useState(false)
+    const [imageHovered, setImageHovered] = useState(false)
+    const imageBoxRef = useRef<HTMLDivElement>(null)
+
+    const checkOverflow = useCallback(() => {
+        const el = imageBoxRef.current
+        if (!el || !asset || asset.width >= asset.height) {
+            setImageOverflows(false)
+            return
+        }
+        // Calculate the natural rendered height based on container width and image aspect ratio.
+        // objectFit="cover" prevents actual scroll overflow, so we compare the computed
+        // natural height against the 70vh max-height constraint instead.
+        const containerWidth = el.clientWidth
+        const aspectRatio = asset.width / asset.height
+        const naturalHeight = containerWidth / aspectRatio
+        const max70vh = window.innerHeight * 0.7
+        setImageOverflows(naturalHeight > max70vh + 1)
+    }, [asset])
+
+    // Observe the image box for size changes to reliably detect overflow
+    useEffect(() => {
+        const el = imageBoxRef.current
+        if (!el) return
+        const ro = new ResizeObserver(() => {
+            checkOverflow()
+        })
+        ro.observe(el)
+        return () => ro.disconnect()
+    }, [assetId, imageExpanded, checkOverflow])
+
+    const handleCopyImage = async () => {
+        if (!asset || !assetId) return
+        setCopiedImage(true)
+        setTimeout(() => setCopiedImage(false), 2000)
+        try {
+            const response = await fetch(API_BASE + "/api/assets/" + assetId + "/clipboard-image")
+            const blob = await response.blob()
+            await navigator.clipboard.write([
+                new ClipboardItem({ "image/png": blob }),
+            ])
+            toaster.create({ title: "Image copied", type: "success" })
+        } catch {
+            setCopiedImage(false)
+            toaster.create({ title: "Failed to copy image", type: "error" })
+        }
+    }
+
+    const handleDelete = async () => {
+        if (!asset) return
+        try {
+            await api.deleteAsset(asset.id)
+            toaster.create({ title: "Asset deleted", type: "success" })
+            onClose()
+        } catch {
+            toaster.create({ title: "Delete failed", type: "error" })
+        }
+    }
+
+    const handleOpenMoveDialog = async () => {
+        setSelectedMoveTarget("")
+        try {
+            const tree = await api.getDirectoryTree()
+            setMoveDirTree(tree.root)
+        } catch {
+            setMoveDirTree(null)
+        }
+        setMoveDialogOpen(true)
+    }
+
+    const handleMoveAsset = async () => {
+        if (!asset || !selectedMoveTarget) return
+        setMoving(true)
+        try {
+            const updated = await api.moveAsset(asset.id, selectedMoveTarget)
+            setAsset(updated)
+            setTags(updated.tags)
+            toaster.create({ title: "Moved to " + selectedMoveTarget, type: "success" })
+            setMoveDialogOpen(false)
+            onRefreshRequested?.()
+        } catch {
+            toaster.create({ title: "Move failed", type: "error" })
+        } finally {
+            setMoving(false)
+        }
+    }
+
+    // Recursive component to render folder options for move dialog
+    function FolderOption({ node, depth }: { node: DirectoryNode; depth: number }) {
+        const isSelected = selectedMoveTarget === node.path
+        return (
+            <>
+                <HStack
+                    gap="1"
+                    py="1.5"
+                    px="2"
+                    pl={2 + depth * 3}
+                    cursor="pointer"
+                    borderRadius="sm"
+                    bg={isSelected ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
+                    _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
+                    onClick={() => setSelectedMoveTarget(node.path)}
+                    transition="background 0.1s"
+                >
+                    <Text fontSize="sm" color="fg" truncate flex="1">{node.name}</Text>
+                    {node.assetCount > 0 && (
+                        <Text fontSize="xs" color="fg.subtle">{node.assetCount}</Text>
+                    )}
+                </HStack>
+                {node.children?.map((child) => (
+                    <FolderOption key={child.path} node={child} depth={depth + 1} />
+                ))}
+            </>
+        )
+    }
+
     return (
         <Stack gap="4">
-            {/* Header */}
-            <HStack justify="space-between">
-                <Text fontSize="lg" fontWeight="semibold" color="fg" truncate>
-                    {loading ? "Loading..." : (asset ? asset.fileName.replace(/\.[^.]+$/, "") : "")}
-                </Text>
+            {/* Close button — only shown on mobile (desktop has sticky bar in SidebarPanel) */}
+            <HStack display={{ base: "flex", md: "none" }} gap="0">
                 <IconButton variant="ghost" size="sm" onClick={onClose} aria-label="Close sidebar">
                     <XIcon />
                 </IconButton>
             </HStack>
 
-            {/* Preview image */}
-            <Box borderRadius="md" overflow="hidden" bg="bg.subtle" border="1px solid" borderColor="border">
-                {!imageLoaded && !error && (
-                    <Skeleton loading height="200px" width="full" />
-                )}
-                {error ? (
-                    <Box height="200px" display="flex" alignItems="center" justifyContent="center" bg="bg.muted">
-                        <Text color="fg.muted" fontSize="sm">Failed to load</Text>
+            {/* Preview image — collapse tall images */}
+            <Box
+                borderRadius="md"
+                overflow="hidden"
+                bg="bg.subtle"
+                border="1px solid"
+                borderColor="border"
+                position="relative"
+                onMouseEnter={() => setImageHovered(true)}
+                onMouseLeave={() => setImageHovered(false)}
+            >
+                <Box
+                    ref={imageBoxRef}
+                    position="relative"
+                    width="full"
+                    css={{ aspectRatio: asset && asset.width && asset.height ? String(asset.width / asset.height) : "4/3" }}
+                    maxH={asset && asset.height > asset.width && !imageExpanded ? "70vh" : undefined}
+                    overflow="hidden"
+                >
+                    {!imageLoaded && !error && (
+                        <Skeleton position="absolute" inset="0" width="full" height="full" />
+                    )}
+                    {error ? (
+                        <Box position="absolute" inset="0" display="flex" alignItems="center" justifyContent="center" bg="bg.muted">
+                            <Text color="fg.muted" fontSize="sm">Failed to load</Text>
+                        </Box>
+                    ) : (
+                        <Image
+                            src={API_BASE + "/api/assets/" + assetId + "/image"}
+                            alt=""
+                            width="full"
+                            height="full"
+                            objectFit="cover"
+                            objectPosition="top"
+                            opacity={imageLoaded ? 1 : 0}
+                            transition="opacity 0.3s"
+                            onLoad={() => setImageLoaded(true)}
+                            onError={() => { setImageLoaded(true); setError(true) }}
+                        />
+                    )}
+                    {/* Copy image button — top-right, visible on hover */}
+                    {asset && imageLoaded && !error && (
+                        <IconButton
+                            position="absolute"
+                            top="2"
+                            right="2"
+                            size="xs"
+                            variant="ghost"
+                            bg="black/40"
+                            color="white"
+                            _hover={{ bg: "black/60" }}
+                            opacity={imageHovered ? 1 : 0}
+                            transition="opacity 0.15s"
+                            aria-label="Copy image"
+                            onClick={(e) => {
+                                e.stopPropagation()
+                                handleCopyImage()
+                            }}
+                        >
+                            {copiedImage ? (
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                    <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                            ) : (
+                                <CopyIcon />
+                            )}
+                        </IconButton>
+                    )}
+                </Box>
+                {imageOverflows && !imageExpanded && (
+                    <Box
+                        position="absolute"
+                        bottom="0"
+                        left="0"
+                        right="0"
+                        textAlign="center"
+                        pb="3"
+                        pt="8"
+                        bgGradient="to-t"
+                        gradientFrom="bg"
+                        gradientTo="transparent"
+                        pointerEvents="none"
+                    >
+                        <Button
+                            size="xs"
+                            variant="ghost"
+                            colorPalette="accent"
+                            pointerEvents="auto"
+                            onClick={() => setImageExpanded(true)}
+                        >
+                            Show more
+                        </Button>
                     </Box>
-                ) : (
-                    <Image
-                        src={API_BASE + "/api/assets/" + assetId + "/image"}
-                        alt=""
-                        width="full"
-                        display={imageLoaded ? "block" : "none"}
-                        loading="lazy"
-                        onLoad={() => setImageLoaded(true)}
-                        onError={() => { setImageLoaded(true); setError(true) }}
-                    />
                 )}
             </Box>
 
-            {/* Metadata rows */}
+            {/* Loading skeleton */}
             {loading && (
                 <Stack gap="3">
                     <Skeleton loading height="16px" width="60%" />
                     <Skeleton loading height="16px" width="40%" />
                     <Skeleton loading height="16px" width="50%" />
+                    <Skeleton loading height="16px" width="70%" />
                 </Stack>
             )}
 
+            {/* Asset details */}
             {asset && !loading && (
                 <>
-                    <VStack gap="2" align="stretch">
-                        <HStack justify="space-between">
-                            <Text fontSize="sm" color="fg.muted">File</Text>
-                            <Text fontSize="sm" color="fg">{asset.fileName}</Text>
-                        </HStack>
-                        <HStack justify="space-between">
-                            <Text fontSize="sm" color="fg.muted">Resolution</Text>
-                            <Text fontSize="sm" color="fg">{asset.width} x {asset.height}</Text>
-                        </HStack>
-                        <HStack justify="space-between">
-                            <Text fontSize="sm" color="fg.muted">Aspect Ratio</Text>
-                            <Text fontSize="sm" color="fg">
-                                {getClosestAspectRatio(asset.width, asset.height)}
-                            </Text>
-                        </HStack>
-                        <HStack justify="space-between">
-                            <Text fontSize="sm" color="fg.muted">Path</Text>
-                            <Text fontSize="sm" color="fg" textAlign="end" wordBreak="break-all">
-                                {asset.relativePath}
-                            </Text>
-                        </HStack>
-                        <HStack justify="space-between">
-                            <Text fontSize="sm" color="fg.muted">Size</Text>
-                            <Text fontSize="sm" color="fg">
-                                {asset.fileSize > 1024 * 1024
-                                    ? (asset.fileSize / (1024 * 1024)).toFixed(1) + " MB"
-                                    : (asset.fileSize / 1024).toFixed(0) + " KB"}
-                            </Text>
-                        </HStack>
-                    </VStack>
+                    {/* Tags first — right after preview image */}
+                    <Box pt="1">
+                        <TagEditor
+                            tags={tags}
+                            assetId={asset.id}
+                            onTagsChange={handleTagsChange}
+                            onTagClick={onTagClick}
+                            selectedTags={selectedTags}
+                            onTagsSaved={handleTagsSaved}
+                        />
+                    </Box>
 
                     <Separator />
 
-                    <TagEditor
-                        tags={tags}
-                        assetId={asset.id}
-                        onTagsChange={handleTagsChange}
-                    />
+                    {/* Metadata grid */}
+                    <Box
+                        display="grid"
+                        gridTemplateColumns="auto 1fr"
+                        gapX="3"
+                        gapY="1.5"
+                        fontSize="sm"
+                    >
+                        <Text color="fg.muted">Resolution</Text>
+                        <Text color="fg">{asset.width} × {asset.height}</Text>
+
+                        <Text color="fg.muted">Aspect Ratio</Text>
+                        <Text color="fg">
+                            {(() => {
+                                const ar = getClosestAspectRatio(asset.width, asset.height)
+                                if (!ar) return "—"
+                                return (
+                                    <>
+                                        <Text as="span">{ar.text}</Text>
+                                        {ar.label && (
+                                            <Badge size="sm" colorPalette="accent" variant="surface" fontWeight="medium" ml="1.5">{ar.label}</Badge>
+                                        )}
+                                        {ar.percent < 95 && (
+                                            <Text as="span" color="fg.subtle" fontSize="sm" ml="2">{ar.percent.toFixed(1)}%</Text>
+                                        )}
+                                    </>
+                                )
+                            })()}
+                        </Text>
+
+                        <Text color="fg.muted">Size</Text>
+                        <Text color="fg">{formatSize(asset.fileSize)}</Text>
+
+                        <Text color="fg.muted">Type</Text>
+                        <Text color="fg">{asset.mimeType}</Text>
+
+                        <Text color="fg.muted">Imported</Text>
+                        <Text color="fg">{formatDate(asset.importedAt)}</Text>
+                    </Box>
+
+                    {/* Path with copy icon */}
+                    <Box>
+                        <Text color="fg.muted" fontSize="xs" mb="1">Path</Text>
+                        <HStack
+                            bg="bg.subtle"
+                            borderRadius="md"
+                            border="1px solid"
+                            borderColor="border"
+                            px="3"
+                            py="2"
+                            gap="2"
+                            cursor="pointer"
+                            onClick={handleCopyPath}
+                            _hover={{ borderColor: "border.accent" }}
+                            transition="border-color 0.15s"
+                        >
+                            <Text fontSize="xs" color="fg" flex="1" wordBreak="break-all" lineClamp={2}>
+                                {asset.relativePath}
+                            </Text>
+                            <Box color={copiedPath ? "green.500" : "fg.muted"} flexShrink="0">
+                                <CopyIcon />
+                            </Box>
+                        </HStack>
+                    </Box>
+
+                    <Separator />
+
+                    {/* Move to Directory */}
+                    <Button size="xs" variant="outline" width="full" onClick={handleOpenMoveDialog}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M5 19l14-4M5 5l14 4-14 4 14 4" />
+                        </svg>
+                        <Box as="span" ml="1">Move to...</Box>
+                    </Button>
+
+                    {/* Delete button with confirmation */}
+                    <Button
+                        size="xs"
+                        variant="outline"
+                        colorPalette="red"
+                        onClick={() => setDeleteConfirmOpen(true)}
+                    >
+                        <TrashIcon />
+                        <Box as="span" ml="1">Delete</Box>
+                    </Button>
+
+                    <Box pb="4" />
+
+                    {/* Move to Directory Dialog */}
+                    <Dialog.Root open={moveDialogOpen} onOpenChange={(e: { open: boolean }) => setMoveDialogOpen(e.open)}>
+                        <Portal>
+                            <Dialog.Backdrop />
+                            <Dialog.Positioner>
+                                <Dialog.Content>
+                                    <Dialog.Header>
+                                        <Dialog.Title>Move to Directory</Dialog.Title>
+                                    </Dialog.Header>
+                                    <Dialog.Body>
+                                        {moveDirTree ? (
+                                            <Box maxH="300px" overflow="auto">
+                                                {moveDirTree.children?.map((child) => (
+                                                    <FolderOption key={child.path} node={child} depth={0} />
+                                                ))}
+                                            </Box>
+                                        ) : (
+                                            <Text fontSize="sm" color="fg.subtle">Loading folders...</Text>
+                                        )}
+                                        {!selectedMoveTarget && (
+                                            <Text fontSize="xs" color="fg.subtle" mt="2">Select a folder to move the asset into</Text>
+                                        )}
+                                        {selectedMoveTarget && (
+                                            <Text fontSize="xs" color="fg.muted" mt="2">Target: {selectedMoveTarget}</Text>
+                                        )}
+                                    </Dialog.Body>
+                                    <Dialog.Footer>
+                                        <Button variant="outline" onClick={() => setMoveDialogOpen(false)}>
+                                            Cancel
+                                        </Button>
+                                        <Button
+                                            colorPalette="accent"
+                                            loading={moving}
+                                            disabled={!selectedMoveTarget}
+                                            onClick={handleMoveAsset}
+                                        >
+                                            Move
+                                        </Button>
+                                    </Dialog.Footer>
+                                </Dialog.Content>
+                            </Dialog.Positioner>
+                        </Portal>
+                    </Dialog.Root>
+
+                    {/* Delete confirmation dialog */}
+                    <Dialog.Root open={deleteConfirmOpen} onOpenChange={(e: { open: boolean }) => setDeleteConfirmOpen(e.open)}>
+                        <Portal>
+                            <Dialog.Backdrop />
+                            <Dialog.Positioner>
+                                <Dialog.Content>
+                                    <Dialog.Header>
+                                        <Dialog.Title>Delete Asset</Dialog.Title>
+                                    </Dialog.Header>
+                                    <Dialog.Body>
+                                        <Text fontSize="sm" color="fg">
+                                            Are you sure you want to delete this asset? This action cannot be undone.
+                                        </Text>
+                                    </Dialog.Body>
+                                    <Dialog.Footer>
+                                        <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>
+                                            Cancel
+                                        </Button>
+                                        <Button colorPalette="red" onClick={handleDelete}>
+                                            Delete
+                                        </Button>
+                                    </Dialog.Footer>
+                                </Dialog.Content>
+                            </Dialog.Positioner>
+                        </Portal>
+                    </Dialog.Root>
                 </>
             )}
         </Stack>

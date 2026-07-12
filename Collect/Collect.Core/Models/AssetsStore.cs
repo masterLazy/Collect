@@ -1,9 +1,3 @@
-namespace Collect.Core.Models;
-
-/// <summary>
-/// JSON-serializable wrapper for the assets collection stored on disk.
-/// </summary>
-public class AssetsStore
-{
-    public List<Asset> Assets { get; set; } = new();
-}
+// AssetsStore has been removed.
+// Asset state is now derived entirely from the filesystem (no JSON persistence).
+// See AssetService._assets (in-memory list) for the current approach.

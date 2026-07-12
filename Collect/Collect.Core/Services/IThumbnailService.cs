@@ -16,4 +16,22 @@ public interface IThumbnailService
     /// Returns true if the thumbnail was successfully generated.
     /// </summary>
     bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400);
+
+    /// <summary>
+    /// Get or create a thumbnail for the given source file, keyed by its content hash (MD5).
+    /// If a thumbnail for the same content already exists, returns its path without regenerating.
+    /// </summary>
+    string? GetOrCreateContentHashThumbnail(string libraryPath, string sourceFilePath);
+
+    /// <summary>
+    /// Delete the thumbnail for a given source file path, if it exists.
+    /// </summary>
+    void DeleteThumbnail(string libraryPath, string sourceFilePath);
+
+    /// <summary>
+    /// Delete all thumbnail files in the library's thumbnail directory that do not
+    /// correspond to any current asset's source file. Call after scan to prevent
+    /// orphaned thumbnails from accumulating when files are renamed or deleted externally.
+    /// </summary>
+    void CleanupOrphanedThumbnails(string libraryPath, IEnumerable<string> currentAssetFilePaths);
 }

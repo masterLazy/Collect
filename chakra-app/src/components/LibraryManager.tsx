@@ -1,61 +1,29 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import {
     Box,
     Button,
     Card,
     Center,
     Checkbox,
+    Dialog,
     Field,
     HStack,
     Input,
+    Portal,
     Separator,
+    Spinner,
     Text,
     VStack,
-    createToaster,
 } from "@chakra-ui/react"
+import type { CustomToaster } from "./CustomToast"
 import { api } from "../services/api"
-
-const RECENT_LIBRARIES_KEY = "collect_recent_libraries"
-
-interface RecentLibrary {
-    name: string
-    path: string
-    lastOpened: string
-}
-
-function getRecentLibraries(): RecentLibrary[] {
-    try {
-        const data = localStorage.getItem(RECENT_LIBRARIES_KEY)
-        return data ? JSON.parse(data) : []
-    } catch {
-        return []
-    }
-}
-
-function addRecentLibrary(lib: RecentLibrary) {
-    const list = getRecentLibraries().filter((l) => l.path !== lib.path)
-    list.unshift(lib)
-    localStorage.setItem(RECENT_LIBRARIES_KEY, JSON.stringify(list.slice(0, 10)))
-}
-
-function removeRecentLibrary(path: string) {
-    const list = getRecentLibraries().filter((l) => l.path !== path)
-    localStorage.setItem(RECENT_LIBRARIES_KEY, JSON.stringify(list))
-}
+import { ServerPathPicker } from "./ServerPathPicker"
+import type { LibraryInfo } from "../types"
 
 function FolderIcon() {
     return (
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-        </svg>
-    )
-}
-
-function ClockIcon() {
-    return (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <polyline points="12 6 12 12 16 14" />
         </svg>
     )
 }
@@ -77,18 +45,60 @@ function XIcon() {
     )
 }
 
+function FolderOpenIcon() {
+    return (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            <path d="M1 10l3 9h16l3-9H1z" />
+        </svg>
+    )
+}
+
+function LibraryIcon() {
+    return (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+        </svg>
+    )
+}
+
 interface LibraryManagerProps {
-    onLibraryReady: () => void
-    toaster: ReturnType<typeof createToaster>
+    onLibraryReady: (libraryId?: string) => void
+    toaster: CustomToaster
 }
 
 export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps) {
-    const [recentLibraries, setRecentLibraries] = useState<RecentLibrary[]>(getRecentLibraries)
+    const [libraries, setLibraries] = useState<LibraryInfo[]>([])
+    const [librariesLoaded, setLibrariesLoaded] = useState(false)
     const [newName, setNewName] = useState("")
     const [newPath, setNewPath] = useState("")
     const [creating, setCreating] = useState(false)
-    const [useMd5, setUseMd5] = useState(false)
-    const [parseTags, setParseTags] = useState(true)
+    const [scanning, setScanning] = useState(false)
+    const [pendingPath, setPendingPath] = useState("")
+    const [pendingName, setPendingName] = useState("")
+    const [showCreatePrompt, setShowCreatePrompt] = useState(false)
+    const [pathPickerOpen, setPathPickerOpen] = useState(false)
+    const [openBrowseOpen, setOpenBrowseOpen] = useState(false)
+    const [removeConfirmId, setRemoveConfirmId] = useState<string | null>(null)
+
+    const fetchLibraries = () => {
+        api.getLibraries()
+            .then((data) => setLibraries(data))
+            .catch(() => {
+                toaster.create({
+                    title: "Load failed",
+                    description: "Cannot fetch libraries from server.",
+                    type: "error",
+                })
+            })
+            .finally(() => setLibrariesLoaded(true))
+    }
+
+    useEffect(() => {
+        fetchLibraries()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
 
     const handleCreate = async () => {
         const name = newName.trim()
@@ -96,17 +106,19 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
         if (!name || !path) return
 
         setCreating(true)
+        setScanning(true)
         try {
-            await api.initLibrary(path, name, { useMd5, parseTags })
-            addRecentLibrary({ name, path, lastOpened: new Date().toISOString() })
+            const info = await api.initLibrary(path, name)
             await api.scanAssets()
+            fetchLibraries()
             toaster.create({
                 title: "Library created",
                 description: "Library '" + name + "' is ready.",
                 type: "success",
             })
-            onLibraryReady()
+            onLibraryReady(info.id)
         } catch {
+            setScanning(false)
             toaster.create({
                 title: "Failed to create library",
                 description: "Check the folder path and try again.",
@@ -117,177 +129,498 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
         }
     }
 
-    const handleOpen = async (lib: RecentLibrary) => {
+    const handleOpenLibrary = async (lib: LibraryInfo) => {
+        setScanning(true)
         try {
-            await api.initLibrary(lib.path, lib.name)
-            addRecentLibrary({ ...lib, lastOpened: new Date().toISOString() })
-            onLibraryReady()
+            await api.loadLibrary(lib.id)
+            onLibraryReady(lib.id)
         } catch {
+            setScanning(false)
             toaster.create({
                 title: "Failed to open library",
-                description: "The library path may no longer be valid.",
+                description: "The library may have been moved or deleted.",
                 type: "error",
             })
         }
     }
 
-    const handleRemoveRecent = (path: string) => {
-        removeRecentLibrary(path)
-        setRecentLibraries(getRecentLibraries())
-    }
-
-    const formatDate = (iso: string) => {
+    const handleRemoveLibrary = async (id: string) => {
         try {
-            return new Date(iso).toLocaleDateString(undefined, {
-                year: "numeric",
-                month: "short",
-                day: "numeric",
-                hour: "2-digit",
-                minute: "2-digit",
+            await api.removeLibrary(id)
+            setLibraries((prev) => prev.filter((l) => l.id !== id))
+            toaster.create({
+                title: "Library removed",
+                description: "The library has been removed from the registry.",
+                type: "success",
             })
         } catch {
-            return iso
+            toaster.create({
+                title: "Remove failed",
+                description: "Could not remove library from registry.",
+                type: "error",
+            })
+        } finally {
+            setRemoveConfirmId(null)
+        }
+    }
+
+    const handleOpenBrowse = async () => {
+        // Open the server path picker for "Open Library"
+        setOpenBrowseOpen(true)
+    }
+
+    const handleOpenBrowseSelect = async (path: string) => {
+        setOpenBrowseOpen(false)
+        if (!path) return
+
+        setScanning(true)
+        try {
+            // Initialize handles both existing libraries (finds .collect/library.json)
+            // and new folders — no need for a separate check step.
+            const name = path.split(/[\\/]/).filter(Boolean).pop() || path
+            const info = await api.initLibrary(path, name)
+            setScanning(false)
+            onLibraryReady(info.id)
+        } catch (err: any) {
+            setScanning(false)
+            toaster.create({
+                title: "Open failed",
+                description: "Could not open this folder as a library.",
+                type: "error",
+            })
         }
     }
 
     return (
-        <Center height="100vh" bg="bg">
-            <VStack gap="8" width="full" maxW="540px" px="4">
-                <Box textAlign="center">
-                    <Text fontSize="3xl" fontWeight="bold" color="fg">
-                        Collect
-                    </Text>
-                    <Text color="fg.muted" fontSize="sm" mt="1">
-                        Library Manager
-                    </Text>
-                </Box>
+        <Box position="relative">
+            <Center height="100vh" bg="bg">
+                <VStack gap="6" width="full" maxW="960px" px="4">
+                    <Box textAlign="center">
+                        <Text fontSize="3xl" fontWeight="bold" color="fg">
+                            Collect
+                        </Text>
+                        <Text color="fg.muted" fontSize="sm" mt="1">
+                            Library Manager
+                        </Text>
+                    </Box>
 
-                {/* Section A: Recent Libraries */}
-                <Card.Root width="full" variant="outline">
-                    <Card.Header pb="3">
-                        <HStack gap="2">
-                            <ClockIcon />
-                            <Text fontWeight="semibold" color="fg">Recent Libraries</Text>
-                        </HStack>
-                    </Card.Header>
-                    <Card.Body pt="0">
-                        {recentLibraries.length === 0 ? (
-                            <Text color="fg.muted" fontSize="sm" py="6" textAlign="center">
-                                No recent libraries. Create one below.
-                            </Text>
-                        ) : (
-                            <VStack gap="0" align="stretch">
-                                {recentLibraries.map((lib, i) => (
-                                    <Box key={lib.path}>
-                                        {i > 0 && <Separator />}
-                                        <HStack
-                                            py="3"
-                                            px="1"
-                                            gap="3"
-                                            cursor="pointer"
-                                            onClick={() => handleOpen(lib)}
-                                            _hover={{ bg: "bg.subtle" }}
-                                            borderRadius="md"
-                                            transition="background 0.15s"
-                                        >
-                                            <Box color="fg.muted" flexShrink="0">
-                                                <FolderIcon />
-                                            </Box>
-                                            <VStack gap="0" align="start" flex="1" minW="0">
-                                                <Text color="fg" fontWeight="medium" fontSize="sm" truncate>
-                                                    {lib.name}
-                                                </Text>
-                                                <Text color="fg.muted" fontSize="xs" truncate>
-                                                    {lib.path}
-                                                </Text>
-                                                <HStack gap="1" color="fg.muted" fontSize="xs">
-                                                    <ClockIcon />
-                                                    <Text>{formatDate(lib.lastOpened)}</Text>
+                    <VStack display={{ base: "flex", md: "none" }} gap="6" width="full" overflow="auto">
+                        {/* Your Libraries */}
+                        <Card.Root width="full" variant="outline">
+                            <Card.Header pb="3">
+                                <HStack gap="2">
+                                    <LibraryIcon />
+                                    <Text fontWeight="semibold" color="fg">Your Libraries</Text>
+                                </HStack>
+                            </Card.Header>
+                            <Card.Body pt="0" maxH="200px" overflow="auto">
+                                {!librariesLoaded ? (
+                                    <VStack gap="3" py="6" color="fg.muted">
+                                        <Spinner size="sm" />
+                                        <Text fontSize="sm">Loading libraries...</Text>
+                                    </VStack>
+                                ) : libraries.length === 0 ? (
+                                    <VStack gap="3" py="6" color="fg.muted">
+                                        <FolderIcon />
+                                        <Text fontSize="sm">No libraries yet. Create or open one below.</Text>
+                                    </VStack>
+                                ) : (
+                                    <VStack gap="0" align="stretch">
+                                        {libraries.map((lib, i) => (
+                                            <Box key={lib.id}>
+                                                {i > 0 && <Separator />}
+                                                <HStack
+                                                    py="3"
+                                                    px="1"
+                                                    gap="3"
+                                                    cursor="pointer"
+                                                    onClick={() => handleOpenLibrary(lib)}
+                                                    _hover={{ bg: "bg.subtle" }}
+                                                    borderRadius="md"
+                                                    transition="background 0.15s"
+                                                >
+                                                    <Box color="fg.muted" flexShrink="0">
+                                                        <FolderIcon />
+                                                    </Box>
+                                                    <VStack gap="0" align="start" flex="1" minW="0">
+                                                        <Text color="fg" fontWeight="medium" fontSize="sm" truncate>
+                                                            {lib.name}
+                                                        </Text>
+                                                        <Text color="fg.muted" fontSize="xs" truncate>
+                                                            {lib.path}
+                                                        </Text>
+                                                        <Text color="fg.muted" fontSize="xs">
+                                                            {lib.assetCount} assets
+                                                        </Text>
+                                                    </VStack>
+                                                    <Button
+                                                        size="xs"
+                                                        variant="ghost"
+                                                        colorPalette="gray"
+                                                        onClick={(e: React.MouseEvent) => {
+                                                            e.stopPropagation()
+                                                            setRemoveConfirmId(lib.id)
+                                                        }}
+                                                        aria-label="Remove from registry"
+                                                        flexShrink="0"
+                                                    >
+                                                        <XIcon />
+                                                    </Button>
                                                 </HStack>
-                                            </VStack>
-                                            <Button
-                                                size="xs"
-                                                variant="ghost"
-                                                colorPalette="gray"
-                                                onClick={(e: React.MouseEvent) => {
-                                                    e.stopPropagation()
-                                                    handleRemoveRecent(lib.path)
-                                                }}
-                                                aria-label="Remove from recent"
-                                                flexShrink="0"
-                                            >
-                                                <XIcon />
-                                            </Button>
-                                        </HStack>
-                                    </Box>
-                                ))}
-                            </VStack>
-                        )}
-                    </Card.Body>
-                </Card.Root>
+                                            </Box>
+                                        ))}
+                                    </VStack>
+                                )}
+                            </Card.Body>
+                        </Card.Root>
 
-                {/* Section B: Create New Library */}
-                <Card.Root width="full" variant="outline">
-                    <Card.Header pb="3">
-                        <HStack gap="2">
-                            <PlusIcon />
-                            <Text fontWeight="semibold" color="fg">Create New Library</Text>
-                        </HStack>
-                    </Card.Header>
-                    <Card.Body pt="0">
-                        <Box as="form" onSubmit={(e: React.FormEvent) => { e.preventDefault(); handleCreate(); }}>
-                            <VStack gap="4">
-                                <Field.Root>
-                                    <Field.Label color="fg">Library Name</Field.Label>
-                                    <Input
-                                        placeholder="My Library"
-                                        value={newName}
-                                        onChange={(e) => setNewName(e.target.value)}
-                                        bg="bg"
-                                        border="1px solid"
-                                        borderColor="border"
-                                        required
-                                    />
-                                </Field.Root>
-                                <Field.Root>
-                                    <Field.Label color="fg">Folder Path</Field.Label>
-                                    <Input
-                                        placeholder="e.g. D:/my-pictures/references"
-                                        value={newPath}
-                                        onChange={(e) => setNewPath(e.target.value)}
-                                        bg="bg"
-                                        border="1px solid"
-                                        borderColor="border"
-                                        required
-                                    />
-                                    <Field.HelperText color="fg.subtle" fontSize="xs">
-                                        e.g. D:\my-pictures\references
-                                    </Field.HelperText>
-                                </Field.Root>
-                                <Checkbox.Root checked={parseTags} onCheckedChange={(e: { checked: boolean }) => setParseTags(!!e.checked)}>
-                                    <Checkbox.HiddenInput />
-                                    <Checkbox.Control />
-                                    <Checkbox.Label color="fg" fontSize="sm">Parse tags from filenames</Checkbox.Label>
-                                </Checkbox.Root>
-                                <Checkbox.Root checked={useMd5} onCheckedChange={(e: { checked: boolean }) => setUseMd5(!!e.checked)}>
-                                    <Checkbox.HiddenInput />
-                                    <Checkbox.Control />
-                                    <Checkbox.Label color="fg" fontSize="sm">Rename files to MD5</Checkbox.Label>
-                                </Checkbox.Root>
-                                <Button
-                                    type="submit"
-                                    colorPalette="accent"
-                                    width="full"
-                                    loading={creating}
-                                    disabled={!newName.trim() || !newPath.trim()}
-                                >
-                                    Create and Scan
+                        {/* Open Library */}
+                        <Card.Root width="full" variant="outline">
+                            <Card.Header pb="3">
+                                <HStack gap="2">
+                                    <FolderOpenIcon />
+                                    <Text fontWeight="semibold" color="fg">Open Library</Text>
+                                </HStack>
+                            </Card.Header>
+                            <Card.Body pt="0">
+                                <VStack gap="4">
+                                    <Text fontSize="sm" color="fg.muted">
+                                        Browse for a folder that already contains a Collect library.
+                                    </Text>
+                                    <Button variant="outline" size="sm" onClick={handleOpenBrowse}>
+                                        <FolderOpenIcon />
+                                        <Box as="span" ml="1">Open Library</Box>
+                                    </Button>
+                                </VStack>
+                            </Card.Body>
+                        </Card.Root>
+
+                        {/* Create New Library */}
+                        <Card.Root id="create-library-section" width="full" variant="outline">
+                            <Card.Header pb="3">
+                                <HStack gap="2">
+                                    <PlusIcon />
+                                    <Text fontWeight="semibold" color="fg">Create New Library</Text>
+                                </HStack>
+                            </Card.Header>
+                            <Card.Body pt="0">
+                                <Box as="form" onSubmit={(e: React.FormEvent) => { e.preventDefault(); handleCreate(); }}>
+                                    <VStack gap="4">
+                                        <Field.Root>
+                                            <Field.Label color="fg">Library Name</Field.Label>
+                                            <Input
+                                                placeholder="My Library"
+                                                value={newName}
+                                                onChange={(e) => setNewName(e.target.value)}
+                                                bg="bg"
+                                                border="1px solid"
+                                                borderColor="border"
+                                                required
+                                            />
+                                        </Field.Root>
+                                        <Field.Root>
+                                            <Field.Label color="fg">Folder Path</Field.Label>
+                                            <HStack gap="2" width="full">
+                                                <Input
+                                                    placeholder="e.g. D:/my-pictures/references"
+                                                    value={newPath}
+                                                    onChange={(e) => setNewPath(e.target.value)}
+                                                    bg="bg"
+                                                    border="1px solid"
+                                                    borderColor="border"
+                                                    required
+                                                    flex="1"
+                                                />
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    size="sm"
+                                                    onClick={() => setPathPickerOpen(true)}
+                                                    flexShrink="0"
+                                                >
+                                                    Browse
+                                                </Button>
+                                            </HStack>
+                                            <Field.HelperText color="fg.subtle" fontSize="xs">
+                                                Click Browse to pick a folder from the server, or type a path.
+                                            </Field.HelperText>
+                                        </Field.Root>
+                                        <Button
+                                            type="submit"
+                                            colorPalette="accent"
+                                            width="full"
+                                            loading={creating}
+                                            disabled={!newName.trim() || !newPath.trim()}
+                                        >
+                                            Create and Scan
+                                        </Button>
+                                    </VStack>
+                                </Box>
+                            </Card.Body>
+                        </Card.Root>
+                    </VStack>
+
+                    <HStack display={{ base: "none", md: "flex" }} gap="6" width="full" align="stretch" flex="1" minH="0">
+                        {/* Left: Your Libraries */}
+                        <Card.Root flex="1" variant="outline" maxH="calc(100vh - 160px)">
+                            <Card.Header pb="3">
+                                <HStack gap="2">
+                                    <LibraryIcon />
+                                    <Text fontWeight="semibold" color="fg">Your Libraries</Text>
+                                </HStack>
+                            </Card.Header>
+                            <Card.Body pt="0" overflow="auto">
+                                {!librariesLoaded ? (
+                                    <VStack gap="3" py="6" color="fg.muted">
+                                        <Spinner size="sm" />
+                                        <Text fontSize="sm">Loading libraries...</Text>
+                                    </VStack>
+                                ) : libraries.length === 0 ? (
+                                    <VStack gap="3" py="6" color="fg.muted">
+                                        <FolderIcon />
+                                        <Text fontSize="sm">No libraries yet. Create or open one below.</Text>
+                                    </VStack>
+                                ) : (
+                                    <VStack gap="0" align="stretch">
+                                        {libraries.map((lib, i) => (
+                                            <Box key={lib.id}>
+                                                {i > 0 && <Separator />}
+                                                <HStack
+                                                    py="3"
+                                                    px="1"
+                                                    gap="3"
+                                                    cursor="pointer"
+                                                    onClick={() => handleOpenLibrary(lib)}
+                                                    _hover={{ bg: "bg.subtle" }}
+                                                    borderRadius="md"
+                                                    transition="background 0.15s"
+                                                >
+                                                    <Box color="fg.muted" flexShrink="0">
+                                                        <FolderIcon />
+                                                    </Box>
+                                                    <VStack gap="0" align="start" flex="1" minW="0">
+                                                        <Text color="fg" fontWeight="medium" fontSize="sm" truncate>
+                                                            {lib.name}
+                                                        </Text>
+                                                        <Text color="fg.muted" fontSize="xs" truncate>
+                                                            {lib.path}
+                                                        </Text>
+                                                        <Text color="fg.muted" fontSize="xs">
+                                                            {lib.assetCount} assets
+                                                        </Text>
+                                                    </VStack>
+                                                    <Button
+                                                        size="xs"
+                                                        variant="ghost"
+                                                        colorPalette="gray"
+                                                        onClick={(e: React.MouseEvent) => {
+                                                            e.stopPropagation()
+                                                            setRemoveConfirmId(lib.id)
+                                                        }}
+                                                        aria-label="Remove from registry"
+                                                        flexShrink="0"
+                                                    >
+                                                        <XIcon />
+                                                    </Button>
+                                                </HStack>
+                                            </Box>
+                                        ))}
+                                    </VStack>
+                                )}
+                            </Card.Body>
+                        </Card.Root>
+
+                        {/* Right: Open Library + Create New Library */}
+                        <VStack gap="6" width="md" minWidth="380px" maxWidth="420px">
+                            {/* Section B: Open Existing Library */}
+                            <Card.Root width="full" variant="outline">
+                                <Card.Header pb="3">
+                                    <HStack gap="2">
+                                        <FolderOpenIcon />
+                                        <Text fontWeight="semibold" color="fg">Open Library</Text>
+                                    </HStack>
+                                </Card.Header>
+                                <Card.Body pt="0">
+                                    <VStack gap="4">
+                                        <Text fontSize="sm" color="fg.muted">
+                                            Browse for a folder that already contains a Collect library.
+                                        </Text>
+                                        <Button variant="outline" size="sm" onClick={handleOpenBrowse}>
+                                            <FolderOpenIcon />
+                                            <Box as="span" ml="1">Open Library</Box>
+                                        </Button>
+                                    </VStack>
+                                </Card.Body>
+                            </Card.Root>
+
+                            {/* Section C: Create New Library */}
+                            <Card.Root id="create-library-section" width="full" variant="outline" flex="1">
+                                <Card.Header pb="3">
+                                    <HStack gap="2">
+                                        <PlusIcon />
+                                        <Text fontWeight="semibold" color="fg">Create New Library</Text>
+                                    </HStack>
+                                </Card.Header>
+                                <Card.Body pt="0" overflow="auto">
+                                    <Box as="form" onSubmit={(e: React.FormEvent) => { e.preventDefault(); handleCreate(); }}>
+                                        <VStack gap="4">
+                                            <Field.Root>
+                                                <Field.Label color="fg">Library Name</Field.Label>
+                                                <Input
+                                                    placeholder="My Library"
+                                                    value={newName}
+                                                    onChange={(e) => setNewName(e.target.value)}
+                                                    bg="bg"
+                                                    border="1px solid"
+                                                    borderColor="border"
+                                                    required
+                                                />
+                                            </Field.Root>
+                                            <Field.Root>
+                                                <Field.Label color="fg">Folder Path</Field.Label>
+                                                <HStack gap="2" width="full">
+                                                    <Input
+                                                        placeholder="e.g. D:/my-pictures/references"
+                                                        value={newPath}
+                                                        onChange={(e) => setNewPath(e.target.value)}
+                                                        bg="bg"
+                                                        border="1px solid"
+                                                        borderColor="border"
+                                                        required
+                                                        flex="1"
+                                                    />
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        size="sm"
+                                                        onClick={() => setPathPickerOpen(true)}
+                                                        flexShrink="0"
+                                                    >
+                                                        Browse
+                                                    </Button>
+                                                </HStack>
+                                                <Field.HelperText color="fg.subtle" fontSize="xs">
+                                                    Click Browse to pick a folder from the server, or type a path.
+                                                </Field.HelperText>
+                                            </Field.Root>
+                                            <Button
+                                                type="submit"
+                                                colorPalette="accent"
+                                                width="full"
+                                                loading={creating}
+                                                disabled={!newName.trim() || !newPath.trim()}
+                                            >
+                                                Create and Scan
+                                            </Button>
+                                        </VStack>
+                                    </Box>
+                                </Card.Body>
+                            </Card.Root>
+                        </VStack>
+                    </HStack>
+                </VStack>
+            </Center>
+
+            {/* Path picker for Create form */}
+            <ServerPathPicker
+                open={pathPickerOpen}
+                onOpenChange={setPathPickerOpen}
+                onSelect={(path) => setNewPath(path)}
+            />
+
+            {/* Path picker for Open Library */}
+            <ServerPathPicker
+                open={openBrowseOpen}
+                onOpenChange={setOpenBrowseOpen}
+                onSelect={handleOpenBrowseSelect}
+            />
+
+            {/* Create prompt dialog */}
+            <Dialog.Root open={showCreatePrompt} onOpenChange={(e: { open: boolean }) => setShowCreatePrompt(e.open)}>
+                <Portal>
+                    <Dialog.Backdrop />
+                    <Dialog.Positioner>
+                        <Dialog.Content>
+                            <Dialog.Header>
+                                <Dialog.Title>Create Library?</Dialog.Title>
+                            </Dialog.Header>
+                            <Dialog.Body>
+                                <Text fontSize="sm" color="fg">
+                                    The folder does not contain a Collect library.
+                                    Would you like to create one?
+                                </Text>
+                            </Dialog.Body>
+                            <Dialog.Footer>
+                                <Button variant="outline" onClick={() => setShowCreatePrompt(false)}>
+                                    Cancel
                                 </Button>
-                            </VStack>
-                        </Box>
-                    </Card.Body>
-                </Card.Root>
-            </VStack>
-        </Center>
+                                <Button
+                                    colorPalette="accent"
+                                    onClick={() => {
+                                        setShowCreatePrompt(false)
+                                        setNewName(pendingName)
+                                        setNewPath(pendingPath)
+                                        document.getElementById("create-library-section")?.scrollIntoView({ behavior: "smooth" })
+                                    }}
+                                >
+                                    Create Library
+                                </Button>
+                            </Dialog.Footer>
+                        </Dialog.Content>
+                    </Dialog.Positioner>
+                </Portal>
+            </Dialog.Root>
+
+            {/* Remove confirmation dialog */}
+            <Dialog.Root open={!!removeConfirmId} onOpenChange={() => setRemoveConfirmId(null)}>
+                <Portal>
+                    <Dialog.Backdrop />
+                    <Dialog.Positioner>
+                        <Dialog.Content>
+                            <Dialog.Header>
+                                <Dialog.Title>Remove Library?</Dialog.Title>
+                            </Dialog.Header>
+                            <Dialog.Body>
+                                <Text fontSize="sm" color="fg">
+                                    This will remove the library from your registry. The folder and its files will not be deleted.
+                                </Text>
+                            </Dialog.Body>
+                            <Dialog.Footer>
+                                <Button variant="outline" onClick={() => setRemoveConfirmId(null)}>
+                                    Cancel
+                                </Button>
+                                <Button
+                                    colorPalette="red"
+                                    onClick={() => removeConfirmId && handleRemoveLibrary(removeConfirmId)}
+                                >
+                                    Remove
+                                </Button>
+                            </Dialog.Footer>
+                        </Dialog.Content>
+                    </Dialog.Positioner>
+                </Portal>
+            </Dialog.Root>
+
+            {/* Scanning overlay */}
+            {scanning && (
+                <Box
+                    position="absolute"
+                    inset="0"
+                    bg="bg/80"
+                    backdropFilter="blur(4px)"
+                    display="flex"
+                    flexDirection="column"
+                    alignItems="center"
+                    justifyContent="center"
+                    gap="4"
+                    zIndex="10"
+                >
+                    <Spinner size="lg" colorPalette="accent" />
+                    <Text color="fg" fontWeight="medium">Scanning assets...</Text>
+                    <Text color="fg.muted" fontSize="sm">This may take a moment for large libraries.</Text>
+                </Box>
+            )}
+        </Box>
     )
 }
+

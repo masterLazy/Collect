@@ -8,10 +8,21 @@ interface AssetCardProps {
     onClick: () => void
 }
 
+function BrokenImageIcon() {
+    return (
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <polyline points="21 15 16 10 5 21" />
+        </svg>
+    )
+}
+
 export function AssetCard({ asset, apiBase, onClick }: AssetCardProps) {
     const [loaded, setLoaded] = useState(false)
     const [error, setError] = useState(false)
     const isLandscape = asset.width > asset.height
+    const aspectRatio = isLandscape ? 4 / 3 : (asset.width && asset.height ? asset.width / asset.height : 4 / 3)
 
     return (
         <Box
@@ -31,29 +42,32 @@ export function AssetCard({ asset, apiBase, onClick }: AssetCardProps) {
                 position="relative"
                 overflow="hidden"
                 width="full"
-                css={isLandscape ? { aspectRatio: "4/3" } : undefined}
+                css={{ aspectRatio }}
             >
                 {!loaded && !error && (
                     <Skeleton
-                        loading
+                        position="absolute"
+                        inset="0"
                         width="full"
-                        height={isLandscape ? undefined : "200px"}
-                    >
-                        <Box aspectRatio={isLandscape ? 4 / 3 : asset.width / asset.height} width="full" />
-                    </Skeleton>
+                        height="full"
+                    />
                 )}
+
                 {error ? (
                     <Box
-                        aspectRatio={16 / 9}
                         width="full"
+                        height="full"
                         display="flex"
+                        flexDirection="column"
                         alignItems="center"
                         justifyContent="center"
+                        gap="2"
                         bg="bg.muted"
                         color="fg.muted"
                         fontSize="sm"
                     >
-                        Failed to load
+                        <BrokenImageIcon />
+                        <Box>Failed to load</Box>
                     </Box>
                 ) : (
                     <Image
@@ -61,10 +75,10 @@ export function AssetCard({ asset, apiBase, onClick }: AssetCardProps) {
                         alt={asset.fileName}
                         width="full"
                         height="full"
-                        objectFit={isLandscape ? "cover" : undefined}
+                        objectFit="cover"
                         objectPosition="center"
-                        display={loaded ? "block" : "none"}
-                        loading="lazy"
+                        opacity={loaded ? 1 : 0}
+                        transition="opacity 0.3s"
                         onLoad={() => setLoaded(true)}
                         onError={() => { setLoaded(true); setError(true) }}
                     />
