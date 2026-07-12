@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Collect.Core/Collect.Core.csproj" Id="3f900f6a-97d3-4e17-8f26-820dfb5e0e9f" />
+  <Project Path="Collect.Wpf/Collect.Wpf.csproj" Id="12d068c1-a972-496f-aba0-86c64697154d" />
+</Solution>
