@@ -22,6 +22,12 @@ interface TopBarProps {
     currentFolder?: string
     alwaysShowSearch?: boolean
     onToggleAlwaysShowSearch?: () => void
+    libraryEncrypted?: boolean
+    onDecrypt?: () => void
+    decrypting?: boolean
+    onEncrypt?: () => void
+    encrypting?: boolean
+    onLock?: () => void
 }
 
 function PlusIcon() {
@@ -127,6 +133,12 @@ export function TopBar({
     currentFolder,
     alwaysShowSearch,
     onToggleAlwaysShowSearch,
+    libraryEncrypted,
+    onDecrypt,
+    decrypting,
+    onEncrypt,
+    encrypting,
+    onLock,
 }: TopBarProps) {
     // Mobile search bar visibility:
     // - If alwaysShowSearch is on: use scroll-based fade
@@ -354,14 +366,13 @@ export function TopBar({
                         isMobile={isMobile}
                     />
 
-                    {/* Mobile: More menu */}
+                    {/* More menu (desktop & mobile) */}
                     <Menu.Root>
                         <Menu.Trigger asChild>
                             <IconButton
                                 variant="ghost"
                                 size="sm"
                                 aria-label="More options"
-                                display={{ base: "inline-flex", md: "none" }}
                             >
                                 <MoreIcon />
                             </IconButton>
@@ -369,25 +380,30 @@ export function TopBar({
                         <Portal>
                             <Menu.Positioner>
                                 <Menu.Content minW="160px">
-                                    <Menu.Item value="home" onClick={onSwitchLibrary} py="2.5">
+                                    {/* Mobile-only: Back to Manager */}
+                                    <Menu.Item value="home" onClick={onSwitchLibrary} py="2.5" display={{ md: "none" }}>
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
                                             <polyline points="9 22 9 12 15 12 15 22" />
                                         </svg>
                                         <Box as="span" ml="2">Back to Manager</Box>
                                     </Menu.Item>
-                                    <Menu.Item value="folders" onClick={onOpenMobileTree} py="2.5">
+                                    {/* Mobile-only: Folders */}
+                                    <Menu.Item value="folders" onClick={onOpenMobileTree} py="2.5" display={{ md: "none" }}>
                                         <FolderIcon />
                                         <Box as="span" ml="2">Folders</Box>
                                     </Menu.Item>
-                                    <Menu.Item value="add" onClick={onOpenAddDialog} py="2.5">
+                                    {/* Mobile-only: Add Assets */}
+                                    <Menu.Item value="add" onClick={onOpenAddDialog} py="2.5" display={{ md: "none" }}>
                                         <PlusIcon />
                                         <Box as="span" ml="2">Add Assets</Box>
                                     </Menu.Item>
+                                    {/* Mobile-only: Always show search */}
                                     <Menu.Item
                                         value="always-search"
                                         onClick={onToggleAlwaysShowSearch}
                                         py="2.5"
+                                        display={{ md: "none" }}
                                     >
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                             <circle cx="11" cy="11" r="8" />
@@ -412,6 +428,36 @@ export function TopBar({
                                             )}
                                         </Box>
                                     </Menu.Item>
+                                    {/* Encrypt for non-encrypted libraries */}
+                                    {!libraryEncrypted && (
+                                        <Menu.Item value="encrypt" onClick={onEncrypt} py="2.5">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                                                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                                            </svg>
+                                            <Box as="span" ml="2">Encrypt Library</Box>
+                                        </Menu.Item>
+                                    )}
+                                    {/* Lock for encrypted libraries — token invalidation */}
+                                    {libraryEncrypted && (
+                                        <Menu.Item value="lock" onClick={onLock} py="2.5">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                                                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                                            </svg>
+                                            <Box as="span" ml="2">Lock (expire token)</Box>
+                                        </Menu.Item>
+                                    )}
+                                    {/* Decrypt for encrypted libraries */}
+                                    {libraryEncrypted && (
+                                        <Menu.Item value="decrypt" onClick={onDecrypt} py="2.5" color="red.500">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                                                <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+                                            </svg>
+                                            <Box as="span" ml="2">Decrypt Library</Box>
+                                        </Menu.Item>
+                                    )}
                                 </Menu.Content>
                             </Menu.Positioner>
                         </Portal>

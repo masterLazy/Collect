@@ -6,6 +6,7 @@ namespace Collect.Core.Services;
 /// Generates WebP thumbnails using SkiaSharp.
 /// Maintains aspect ratio with a max width of 400px.
 /// Thread-safe via a static lock on generation.
+/// Supports encrypted source files via optional encryption key.
 /// </summary>
 public class ThumbnailService : IThumbnailService
 {
@@ -13,11 +14,19 @@ public class ThumbnailService : IThumbnailService
     private const int WebpQuality = 85;
     private static readonly object _lock = new();
 
+    private readonly IEncryptionService _encryptionService;
+
+    public ThumbnailService(IEncryptionService encryptionService)
+    {
+        _encryptionService = encryptionService;
+    }
+
     /// <summary>
     /// Gets the thumbnail path for an asset, generating it if missing or outdated.
     /// Returns the path to the thumbnail file, or null if generation failed.
+    /// When <paramref name="encryptionKey"/> is provided, the source file is decrypted before processing.
     /// </summary>
-    public string? GetThumbnailPath(string assetId, string sourceFilePath)
+    public string? GetThumbnailPath(string assetId, string sourceFilePath, byte[]? encryptionKey = null)
     {
         var thumbDir = Path.Combine(
             Path.GetDirectoryName(Path.GetDirectoryName(sourceFilePath)) ?? ".",
@@ -31,7 +40,7 @@ public class ThumbnailService : IThumbnailService
         if (IsThumbnailValid(sourceFilePath, thumbPath))
             return thumbPath;
 
-        return TryGenerateThumbnail(sourceFilePath, thumbPath, ThumbnailMaxWidth)
+        return TryGenerateThumbnail(sourceFilePath, thumbPath, ThumbnailMaxWidth, encryptionKey)
             ? thumbPath
             : null;
     }
@@ -39,8 +48,9 @@ public class ThumbnailService : IThumbnailService
     /// <summary>
     /// Generate a thumbnail from the source file and save it to the output path.
     /// Returns true if the thumbnail was successfully generated.
+    /// When <paramref name="encryptionKey"/> is provided, the source file is decrypted before processing.
     /// </summary>
-    public bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400)
+    public bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400, byte[]? encryptionKey = null)
     {
         // Thread-safe: only one thumbnail generation at a time
         lock (_lock)
@@ -51,39 +61,61 @@ public class ThumbnailService : IThumbnailService
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-                using var input = File.OpenRead(sourceFilePath);
-                using var original = SKBitmap.Decode(input);
+                if (encryptionKey is not null)
+                {
+                    // Decrypt the source file before decoding
+                    var decrypted = _encryptionService.ReadAndDecryptFile(sourceFilePath, encryptionKey);
+                    using var original = SKBitmap.Decode(decrypted);
 
-                if (original == null)
-                    return false;
+                    if (original == null)
+                        return false;
 
-                // Calculate new dimensions maintaining aspect ratio
-                int newWidth = Math.Min(maxWidth, original.Width);
-                int newHeight = (int)((double)newWidth / original.Width * original.Height);
+                    return GenerateAndSaveThumbnail(original, outputPath, maxWidth);
+                }
+                else
+                {
+                    using var input = File.OpenRead(sourceFilePath);
+                    using var original = SKBitmap.Decode(input);
 
-                // Resize the bitmap using SkiaSharp 3.x compatible API
-                using var resized = original.Resize(
-                    new SKImageInfo(newWidth, newHeight),
-                    new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear));
+                    if (original == null)
+                        return false;
 
-                if (resized == null)
-                    return false;
-
-                // Encode as WebP
-                using var image = SKImage.FromBitmap(resized);
-                using var data = image.Encode(SKEncodedImageFormat.Webp, WebpQuality);
-
-                // Write to disk
-                using var output = File.OpenWrite(outputPath);
-                data.SaveTo(output);
-
-                return true;
+                    return GenerateAndSaveThumbnail(original, outputPath, maxWidth);
+                }
             }
             catch
             {
                 return false;
             }
         }
+    }
+
+    /// <summary>
+    /// Generate a thumbnail from a decoded bitmap and save it as WebP.
+    /// </summary>
+    private static bool GenerateAndSaveThumbnail(SKBitmap original, string outputPath, int maxWidth)
+    {
+        // Calculate new dimensions maintaining aspect ratio
+        int newWidth = Math.Min(maxWidth, original.Width);
+        int newHeight = (int)((double)newWidth / original.Width * original.Height);
+
+        // Resize the bitmap using SkiaSharp 3.x compatible API
+        using var resized = original.Resize(
+            new SKImageInfo(newWidth, newHeight),
+            new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear));
+
+        if (resized == null)
+            return false;
+
+        // Encode as WebP
+        using var image = SKImage.FromBitmap(resized);
+        using var data = image.Encode(SKEncodedImageFormat.Webp, WebpQuality);
+
+        // Write to disk
+        using var output = File.OpenWrite(outputPath);
+        data.SaveTo(output);
+
+        return true;
     }
 
     /// <summary>
@@ -104,8 +136,9 @@ public class ThumbnailService : IThumbnailService
     /// Get or create a thumbnail for the given source file, keyed by its relative path + metadata.
     /// If a thumbnail already exists and is up-to-date, returns its path without regenerating.
     /// Uses file size + last-write time (not content hash) as the key — avoids reading file content.
+    /// When <paramref name="encryptionKey"/> is provided, the source file is decrypted before processing.
     /// </summary>
-    public string? GetOrCreateContentHashThumbnail(string libraryPath, string sourceFilePath)
+    public string? GetOrCreateContentHashThumbnail(string libraryPath, string sourceFilePath, byte[]? encryptionKey = null)
     {
         if (!File.Exists(sourceFilePath))
             return null;
@@ -118,7 +151,7 @@ public class ThumbnailService : IThumbnailService
         if (File.Exists(thumbPath))
             return thumbPath;
 
-        return TryGenerateThumbnail(sourceFilePath, thumbPath) ? thumbPath : null;
+        return TryGenerateThumbnail(sourceFilePath, thumbPath, encryptionKey: encryptionKey) ? thumbPath : null;
     }
 
     /// <summary>

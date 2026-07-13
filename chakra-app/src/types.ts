@@ -51,6 +51,7 @@ export interface LibraryInfo {
     path: string;
     assetCount: number;
     categoryOrder?: string[];
+    isEncrypted?: boolean;
 }
 
 export interface DirectoryNode {

@@ -17,7 +17,8 @@ import {
 } from "@chakra-ui/react"
 import { api } from "../services/api"
 import { TagEditor } from "./TagEditor"
-import type { AssetDetailDto, AssetTag, DirectoryNode } from "../types"
+import { DirectoryTreePicker } from "./DirectoryPicker"
+import type { AssetDetailDto, AssetTag } from "../types"
 
 const API_BASE = `http://${window.location.hostname}:5000`
 
@@ -126,7 +127,6 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [tags, setTags] = useState<AssetTag[]>([])
     const [copiedPath, setCopiedPath] = useState(false)
     const [moveDialogOpen, setMoveDialogOpen] = useState(false)
-    const [moveDirTree, setMoveDirTree] = useState<DirectoryNode | null>(null)
     const [selectedMoveTarget, setSelectedMoveTarget] = useState<string>("")
     const [moveTargetSelected, setMoveTargetSelected] = useState(false)
     const [moving, setMoving] = useState(false)
@@ -243,15 +243,9 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         }
     }
 
-    const handleOpenMoveDialog = async () => {
+    const handleOpenMoveDialog = () => {
         setSelectedMoveTarget("")
         setMoveTargetSelected(true) // Root pre-selected
-        try {
-            const tree = await api.getDirectoryTree()
-            setMoveDirTree(tree.root)
-        } catch {
-            setMoveDirTree(null)
-        }
         setMoveDialogOpen(true)
     }
 
@@ -271,35 +265,6 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         } finally {
             setMoving(false)
         }
-    }
-
-    // Recursive component to render folder options for move dialog
-    function FolderOption({ node, depth }: { node: DirectoryNode; depth: number }) {
-        const isSelected = selectedMoveTarget === node.path
-        return (
-            <>
-                <HStack
-                    gap="1"
-                    py="1.5"
-                    px="2"
-                    pl={2 + depth * 3}
-                    cursor="pointer"
-                    borderRadius="sm"
-                    bg={isSelected ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
-                    _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
-                    onClick={() => { setSelectedMoveTarget(node.path); setMoveTargetSelected(true) }}
-                    transition="background 0.1s"
-                >
-                    <Text fontSize="sm" color="fg" truncate flex="1">{node.name}</Text>
-                    {node.assetCount > 0 && (
-                        <Text fontSize="xs" color="fg.subtle">{node.assetCount}</Text>
-                    )}
-                </HStack>
-                {node.children?.map((child) => (
-                    <FolderOption key={child.path} node={child} depth={depth + 1} />
-                ))}
-            </>
-        )
     }
 
     return (
@@ -546,29 +511,10 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                                         <Dialog.Title>Move to Directory</Dialog.Title>
                                     </Dialog.Header>
                                     <Dialog.Body>
-                                        {moveDirTree ? (
-                                            <Box maxH="300px" overflow="auto">
-                                                {/* Root option */}
-                                                <HStack
-                                                    gap="1"
-                                                    py="1.5"
-                                                    px="2"
-                                                    cursor="pointer"
-                                                    borderRadius="sm"
-                                                    bg={selectedMoveTarget === "" ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
-                                                    _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
-                                                    onClick={() => { setSelectedMoveTarget(""); setMoveTargetSelected(true) }}
-                                                    transition="background 0.1s"
-                                                >
-                                                    <Text fontSize="sm" color="fg" truncate flex="1">Root</Text>
-                                                </HStack>
-                                                {moveDirTree.children?.map((child) => (
-                                                    <FolderOption key={child.path} node={child} depth={0} />
-                                                ))}
-                                            </Box>
-                                        ) : (
-                                            <Text fontSize="sm" color="fg.subtle">Loading folders...</Text>
-                                        )}
+                                        <DirectoryTreePicker
+                                            selectedPath={selectedMoveTarget}
+                                            onSelect={(path) => { setSelectedMoveTarget(path); setMoveTargetSelected(true) }}
+                                        />
                                         {!selectedMoveTarget && (
                                             <Text fontSize="xs" color="fg.subtle" mt="2">Select a folder to move the asset into</Text>
                                         )}

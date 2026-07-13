@@ -6,6 +6,7 @@ var builder = WebApplication.CreateBuilder(args);
 // ── Services ──────────────────────────────────────────
 builder.Services.AddControllers();
 
+builder.Services.AddSingleton<IEncryptionService, EncryptionService>();
 builder.Services.AddSingleton<ILibraryService, LibraryService>();
 builder.Services.AddSingleton<IAssetService, AssetService>();
 builder.Services.AddSingleton<ITagService, TagService>();

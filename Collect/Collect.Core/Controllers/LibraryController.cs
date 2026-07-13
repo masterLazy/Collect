@@ -9,15 +9,20 @@ namespace Collect.Core.Controllers;
 public class LibraryController : ControllerBase
 {
     private readonly ILibraryService _libraryService;
+    private readonly IAssetService _assetService;
 
-    public LibraryController(ILibraryService libraryService)
+    public LibraryController(ILibraryService libraryService, IAssetService assetService)
     {
         _libraryService = libraryService;
+        _assetService = assetService;
     }
 
     /// <summary>
     /// POST /api/library/init
-    /// Initialize a library at the given filesystem path with an optional display name.
+    /// Initialize a library at the given filesystem path with an optional display name
+    /// and optional encryption password.
+    /// When <paramref name="password"/> is provided, the library files are encrypted at rest
+    /// using AES-256-GCM (key derived via PBKDF2).
     /// </summary>
     [HttpPost("init")]
     public async Task<IActionResult> Initialize([FromBody] InitRequest request)
@@ -28,13 +33,18 @@ public class LibraryController : ControllerBase
         if (!Directory.Exists(request.Path))
             return BadRequest(new { error = $"Directory does not exist: {request.Path}" });
 
-        var info = await _libraryService.InitializeAsync(request.Path, request.Name);
-        return Ok(info);
+        var info = await _libraryService.InitializeAsync(request.Path, request.Name, request.Password);
+
+        // Strip sensitive encryption data from response
+        var sanitized = SanitizeLibraryInfo(info);
+
+        return Ok(sanitized);
     }
 
     /// <summary>
     /// GET /api/library/info
     /// Get metadata about the current library.
+    /// For encrypted libraries, sensitive fields (salt, verification hash) are excluded.
     /// </summary>
     [HttpGet("info")]
     public async Task<IActionResult> GetInfo()
@@ -43,7 +53,137 @@ public class LibraryController : ControllerBase
         if (info is null)
             return NotFound(new { error = "Library not initialized." });
 
-        return Ok(info);
+        var sanitized = SanitizeLibraryInfo(info);
+
+        // For encrypted libraries that are not unlocked, mask sensitive metadata
+        if (info.IsEncrypted && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+        {
+            return Ok(new
+            {
+                info.Id,
+                info.Version,
+                info.Name,
+                info.Path,
+                info.CreatedAt,
+                AssetCount = 0,
+                info.CategoryOrder,
+                info.IsEncrypted,
+                Locked = true
+            });
+        }
+
+        return Ok(sanitized);
+    }
+
+    private string? GetUnlockToken() =>
+        Request.Headers.TryGetValue("X-Unlock-Token", out var values) ? values.FirstOrDefault() : null;
+
+    /// <summary>
+    /// POST /api/library/unlock
+    /// Unlock an encrypted library with a password.
+    /// Returns the LibraryInfo and a session token if successful, or 401 if the password is wrong.
+    /// </summary>
+    [HttpPost("unlock")]
+    public async Task<IActionResult> Unlock([FromBody] UnlockRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Password))
+            return BadRequest(new { error = "Password is required." });
+
+        var (info, token) = await _libraryService.UnlockAsync(request.Password);
+        if (info is null)
+            return Unauthorized(new { error = "Invalid password." });
+
+        // Invalidate asset cache so the next fetch re-scans with the decryption key,
+        // correctly extracting image dimensions from encrypted files.
+        _assetService.InvalidateCache();
+
+        var sanitized = SanitizeLibraryInfo(info);
+        return Ok(new { library = sanitized, token });
+    }
+
+    /// <summary>
+    /// POST /api/library/lock
+    /// Lock the current library by clearing the encryption key from memory.
+    /// The library remains the current library, but assets cannot be accessed until re-unlocked.
+    /// </summary>
+    [HttpPost("lock")]
+    public IActionResult Lock()
+    {
+        // Clear ALL sessions — not just the caller's token — so all devices are locked out.
+        _libraryService.LockLibrary();
+        return Ok(new { message = "Library locked." });
+    }
+
+    /// <summary>
+    /// GET /api/library/unlock-status
+    /// Check if the current library is unlocked.
+    /// </summary>
+    [HttpGet("unlock-status")]
+    public async Task<IActionResult> GetUnlockStatus()
+    {
+        var token = GetUnlockToken();
+        var (unlocked, remainingSeconds) = await _libraryService.GetUnlockStatusAsync(token);
+        return Ok(new { unlocked, remainingSeconds });
+    }
+
+    /// <summary>
+    /// POST /api/library/encrypt
+    /// Encrypt all files in the current library with the given password.
+    /// </summary>
+    [HttpPost("encrypt")]
+    public async Task<IActionResult> EncryptLibrary([FromBody] EncryptRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Password))
+            return BadRequest(new { error = "Password is required." });
+
+        try
+        {
+            var count = await _assetService.EncryptLibraryAsync(request.Password);
+            return Ok(new { message = $"Library encrypted. {count} files processed.", encryptedCount = count });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// POST /api/library/decrypt
+    /// Decrypt all encrypted files in the current library and remove encryption.
+    /// Accepts an optional password for repair decryption (when library.json says not encrypted
+    /// but files are still encrypted, or when the unlock session has expired).
+    /// </summary>
+    [HttpPost("decrypt")]
+    public async Task<IActionResult> DecryptLibrary([FromBody] DecryptRequest? request)
+    {
+        try
+        {
+            var password = request?.Password;
+            var count = await _assetService.DecryptLibraryAsync(password);
+            return Ok(new { message = $"Library decrypted. {count} files processed.", decryptedCount = count });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Strip sensitive encryption fields (Salt, VerificationHash) from the response.
+    /// </summary>
+    private static object SanitizeLibraryInfo(LibraryInfo info)
+    {
+        return new
+        {
+            info.Id,
+            info.Version,
+            info.Name,
+            info.Path,
+            info.CreatedAt,
+            info.AssetCount,
+            info.CategoryOrder,
+            info.IsEncrypted
+        };
     }
 
     /// <summary>
@@ -53,6 +193,9 @@ public class LibraryController : ControllerBase
     [HttpGet("tree")]
     public async Task<IActionResult> GetTree()
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var tree = await _libraryService.GetDirectoryTreeAsync();
         return Ok(new { root = tree });
     }
@@ -108,6 +251,7 @@ public class LibraryController : ControllerBase
     /// GET /api/library/check?path=...
     /// Check if a given path has an initialized library (looks for .collect/library.json).
     /// Returns the LibraryInfo if found, or 404 with { isLibrary: false }.
+    /// Sensitive encryption fields are excluded from the response.
     /// </summary>
     [HttpGet("check")]
     public async Task<IActionResult> CheckPath([FromQuery] string path)
@@ -120,7 +264,8 @@ public class LibraryController : ControllerBase
         var info = await _libraryService.CheckPathAsync(path);
         if (info is null)
             return NotFound(new { isLibrary = false, path });
-        return Ok(new { isLibrary = true, info });
+        var sanitized = SanitizeLibraryInfo(info);
+        return Ok(new { isLibrary = true, info = sanitized });
     }
 
     /// <summary>
@@ -160,17 +305,20 @@ public class LibraryController : ControllerBase
     /// <summary>
     /// GET /api/libraries
     /// Get all registered libraries from the persistent registry.
+    /// Sensitive encryption fields (salt, verification hash) are excluded.
     /// </summary>
     [HttpGet("/api/libraries")]
     public async Task<IActionResult> GetLibraries()
     {
         var libraries = await _libraryService.GetLibrariesAsync();
-        return Ok(libraries);
+        var sanitized = libraries.Select(SanitizeLibraryInfo).ToList();
+        return Ok(sanitized);
     }
 
     /// <summary>
     /// POST /api/library/load/{id}
     /// Load a library by its registry ID and set it as the current library.
+    /// For encrypted libraries, sensitive fields are excluded from the response.
     /// </summary>
     [HttpPost("load/{id}")]
     public async Task<IActionResult> LoadById(string id)
@@ -178,7 +326,8 @@ public class LibraryController : ControllerBase
         var info = await _libraryService.LoadByIdAsync(id);
         if (info is null)
             return NotFound(new { error = $"Library '{id}' not found." });
-        return Ok(info);
+        var sanitized = SanitizeLibraryInfo(info);
+        return Ok(sanitized);
     }
 
     /// <summary>
@@ -199,6 +348,12 @@ public class InitRequest
 {
     public string Path { get; set; } = string.Empty;
     public string? Name { get; set; }
+    public string? Password { get; set; }
+}
+
+public class UnlockRequest
+{
+    public string Password { get; set; } = string.Empty;
 }
 
 public class CreateDirectoryRequest
@@ -220,4 +375,14 @@ public class DeleteDirectoryRequest
 public class CategoryOrderRequest
 {
     public List<string> Order { get; set; } = new();
+}
+
+public class DecryptRequest
+{
+    public string? Password { get; set; }
+}
+
+public class EncryptRequest
+{
+    public string Password { get; set; } = string.Empty;
 }

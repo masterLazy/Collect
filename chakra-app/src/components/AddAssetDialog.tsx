@@ -5,9 +5,7 @@ import {
     Checkbox,
     Dialog,
     Drawer,
-    Field,
     HStack,
-    Input,
     Portal,
     Stack,
     Tag,
@@ -15,8 +13,10 @@ import {
     VStack,
 } from "@chakra-ui/react"
 import { api } from "../services/api"
+import { TagEditor } from "./TagEditor"
+import { DirectoryPicker } from "./DirectoryPicker"
 import type { CustomToaster } from "./CustomToast"
-import type { DirectoryNode, UploadResult } from "../types"
+import type { AssetTag, UploadResult } from "../types"
 
 interface AddAssetDialogProps {
     open: boolean
@@ -50,16 +50,6 @@ function XIcon() {
     )
 }
 
-function FolderPlusIcon() {
-    return (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-            <line x1="12" y1="11" x2="12" y2="17" />
-            <line x1="9" y1="14" x2="15" y2="14" />
-        </svg>
-    )
-}
-
 const ALLOWED_TYPES = [
     "image/jpeg",
     "image/png",
@@ -77,67 +67,26 @@ function formatSize(bytes: number): string {
     return bytes + " B"
 }
 
-function FolderOption({
-    node,
-    depth,
-    selectedPath,
-    onSelect,
-}: {
-    node: DirectoryNode
-    depth: number
-    selectedPath: string
-    onSelect: (path: string) => void
-}) {
-    const isSelected = selectedPath === node.path
-    return (
-        <>
-            <HStack
-                gap="1"
-                py="1.5"
-                px="2"
-                pl={2 + depth * 3}
-                cursor="pointer"
-                borderRadius="sm"
-                bg={isSelected ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
-                _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
-                onClick={() => onSelect(node.path)}
-                transition="background 0.1s"
-            >
-                <Text fontSize="sm" color="fg" truncate flex="1">{node.name}</Text>
-                {node.assetCount > 0 && (
-                    <Text fontSize="xs" color="fg.subtle">{node.assetCount}</Text>
-                )}
-            </HStack>
-            {node.children?.map((child) => (
-                <FolderOption key={child.path} node={child} depth={depth + 1} selectedPath={selectedPath} onSelect={onSelect} />
-            ))}
-        </>
-    )
-}
-
 export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssetsAdded }: AddAssetDialogProps) {
     const [files, setFiles] = useState<FileEntry[]>([])
     const [targetDir, setTargetDir] = useState("Uncategorized")
     const [uploading, setUploading] = useState(false)
     const [dragOver, setDragOver] = useState(false)
-    const [tree, setTree] = useState<DirectoryNode | null>(null)
     const [folderDialogOpen, setFolderDialogOpen] = useState(false)
-    const [creatingSubfolder, setCreatingSubfolder] = useState(false)
-    const [newFolderName, setNewFolderName] = useState("")
     const [keepFilename, setKeepFilename] = useState(false)
+    const [batchTags, setBatchTags] = useState<AssetTag[]>([])
     const fileInputRef = useRef<HTMLInputElement>(null)
 
     useEffect(() => {
         if (open) {
-            api.getDirectoryTree().then((data) => setTree(data.root)).catch(() => { })
             setFiles([])
             setTargetDir("Uncategorized")
             setUploading(false)
             setDragOver(false)
             setFolderDialogOpen(false)
-            setCreatingSubfolder(false)
-            setNewFolderName("")
+
             setKeepFilename(false)
+            setBatchTags([])
         }
     }, [open])
 
@@ -183,32 +132,13 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
         setFiles((prev) => prev.filter((_, i) => i !== index))
     }
 
-    const handleCreateSubfolder = async () => {
-        const name = newFolderName.trim()
-        if (!name) return
-        try {
-            const relativePath = targetDir === "Uncategorized" ? name : targetDir + "/" + name
-            await api.createDirectory(relativePath)
-            setNewFolderName("")
-            setCreatingSubfolder(false)
-            const data = await api.getDirectoryTree()
-            setTree(data.root)
-            setTargetDir(relativePath)
-        } catch {
-            toaster.create({
-                title: "Failed to create folder",
-                type: "error",
-            })
-        }
-    }
-
     const handleSubmit = async () => {
         const readyFiles = files.filter((f) => f.status === "ready").map((f) => f.file)
         if (readyFiles.length === 0) return
 
         setUploading(true)
         try {
-            const result: UploadResult = await api.uploadAssets(readyFiles, targetDir, keepFilename)
+            const result: UploadResult = await api.uploadAssets(readyFiles, targetDir, keepFilename, batchTags)
             toaster.create({
                 title: "Upload complete",
                 description: result.added + " file(s) added" + (result.errors.length > 0 ? ", " + result.errors.length + " error(s)" : ""),
@@ -227,8 +157,8 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
         }
     }
 
-    const content = (
-        <Stack gap="4">
+    const leftPanel = (
+        <Stack gap="4" flex="1" minW="0">
             {/* Drop zone */}
             <Box
                 border="2px dashed"
@@ -266,96 +196,27 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
             </Box>
 
             {/* Target directory — button opens a dialog with folder tree */}
-            <Field.Root>
-                <Field.Label color="fg">Target Directory</Field.Label>
-                <HStack gap="2">
-                    <Button
-                        size="sm"
-                        variant="outline"
-                        width="full"
-                        justifyContent="space-between"
-                        onClick={() => setFolderDialogOpen(true)}
-                    >
-                        <Text fontSize="sm" truncate>{targetDir}</Text>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                            <polyline points="9 18 15 12 9 6" />
-                        </svg>
-                    </Button>
-                    <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setCreatingSubfolder(!creatingSubfolder)}
-                        aria-label="Create subfolder"
-                    >
-                        <FolderPlusIcon />
-                    </Button>
-                </HStack>
-            </Field.Root>
+            <Button
+                size="sm"
+                variant="outline"
+                width="full"
+                justifyContent="space-between"
+                onClick={() => setFolderDialogOpen(true)}
+            >
+                <Text fontSize="sm" truncate>{targetDir}</Text>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                    <polyline points="9 18 15 12 9 6" />
+                </svg>
+            </Button>
 
             {/* Folder picker dialog */}
-            <Dialog.Root open={folderDialogOpen} onOpenChange={(e: { open: boolean }) => setFolderDialogOpen(e.open)}>
-                <Portal>
-                    <Dialog.Backdrop />
-                    <Dialog.Positioner>
-                        <Dialog.Content>
-                            <Dialog.Header>
-                                <Dialog.Title>Select Target Directory</Dialog.Title>
-                            </Dialog.Header>
-                            <Dialog.Body>
-                                {tree ? (
-                                    <Box maxH="300px" overflow="auto">
-                                        <FolderOption
-                                            node={{ name: "Uncategorized", path: "Uncategorized", assetCount: 0, children: [] }}
-                                            depth={0}
-                                            selectedPath={targetDir}
-                                            onSelect={(path) => { setTargetDir(path); setFolderDialogOpen(false) }}
-                                        />
-                                        <FolderOption
-                                            node={tree}
-                                            depth={0}
-                                            selectedPath={targetDir}
-                                            onSelect={(path) => { setTargetDir(path); setFolderDialogOpen(false) }}
-                                        />
-                                    </Box>
-                                ) : (
-                                    <Text fontSize="sm" color="fg.subtle">Loading folders...</Text>
-                                )}
-                                <Text fontSize="xs" color="fg.subtle" mt="2">
-                                    Current: {targetDir}
-                                </Text>
-                            </Dialog.Body>
-                            <Dialog.Footer>
-                                <Button variant="outline" onClick={() => setFolderDialogOpen(false)}>
-                                    Cancel
-                                </Button>
-                                <Button colorPalette="accent" onClick={() => setFolderDialogOpen(false)}>
-                                    Select
-                                </Button>
-                            </Dialog.Footer>
-                        </Dialog.Content>
-                    </Dialog.Positioner>
-                </Portal>
-            </Dialog.Root>
-
-            {creatingSubfolder && (
-                <HStack gap="2">
-                    <Input
-                        placeholder="New folder name"
-                        value={newFolderName}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewFolderName(e.target.value)}
-                        size="sm"
-                        bg="bg"
-                        border="1px solid"
-                        borderColor="border"
-                    />
-                    <Button size="sm" colorPalette="accent" onClick={handleCreateSubfolder}>
-                        Create
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => { setCreatingSubfolder(false); setNewFolderName("") }}>
-                        Cancel
-                    </Button>
-                </HStack>
-            )}
+            <DirectoryPicker
+                open={folderDialogOpen}
+                onOpenChange={(open) => setFolderDialogOpen(open)}
+                selectedPath={targetDir}
+                onSelect={(path) => setTargetDir(path)}
+                title="Select Target Directory"
+            />
 
             {/* Keep filename checkbox */}
             <Checkbox.Root
@@ -368,6 +229,33 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
                     Keep filename
                 </Checkbox.Label>
             </Checkbox.Root>
+        </Stack>
+    )
+
+    const rightPanel = !keepFilename && (
+        <Box flex="1" minW="0">
+            <TagEditor
+                tags={batchTags}
+                assetId="batch"
+                onTagsChange={setBatchTags}
+            />
+        </Box>
+    )
+
+    const content = (
+        <Stack gap="4">
+            {/* Desktop: side-by-side layout */}
+            {!isMobile ? (
+                <HStack gap="6" alignItems="flex-start">
+                    {leftPanel}
+                    {rightPanel}
+                </HStack>
+            ) : (
+                <Stack gap="4">
+                    {leftPanel}
+                    {rightPanel}
+                </Stack>
+            )}
 
             {/* File list preview */}
             {files.length > 0 && (
@@ -449,7 +337,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
     }
 
     return (
-        <Dialog.Root open={open} onOpenChange={(e: { open: boolean }) => onOpenChange(e.open)} size="lg">
+        <Dialog.Root open={open} onOpenChange={(e: { open: boolean }) => onOpenChange(e.open)} size="xl">
             <Portal>
                 <Dialog.Backdrop />
                 <Dialog.Positioner>

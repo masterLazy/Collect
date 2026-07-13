@@ -44,10 +44,8 @@ function HomePage() {
         return api.getLibraryInfo()
       })
       .then((info) => {
-        if (!cancelled && info?.id) {
-          // Library is already active — redirect using short 8-char ID
-          navigate(`/${info.id.slice(0, 8)}`, { replace: true })
-        } else if (!cancelled) {
+        if (!cancelled) {
+          // Always show library manager — let the user pick a library
           setLibraryReady(false)
         }
       })

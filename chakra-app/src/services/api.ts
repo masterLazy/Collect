@@ -2,8 +2,33 @@ import type { AssetDetailDto, AssetDto, AssetTag, DirectoryTreeResponse, Library
 
 const API_BASE = `http://${window.location.hostname}:5000`;
 
+// ── Unlock Token Management ──────────────────────────
+// Token is stored in sessionStorage (persists across F5, cleared on tab close)
+// This keeps the unlock device-specific (different browsers/devices get different tokens)
+
+function getToken(): string | null {
+    return sessionStorage.getItem("collect-unlock-token");
+}
+
+function setToken(token: string) {
+    sessionStorage.setItem("collect-unlock-token", token);
+}
+
+function clearToken() {
+    sessionStorage.removeItem("collect-unlock-token");
+}
+
+function buildHeaders(extra?: Record<string, string>): Record<string, string> {
+    const headers: Record<string, string> = { ...extra };
+    const token = getToken();
+    if (token) headers["X-Unlock-Token"] = token;
+    return headers;
+}
+
 async function get<T>(url: string): Promise<T> {
-    const response = await fetch(`${API_BASE}${url}`);
+    const response = await fetch(`${API_BASE}${url}`, {
+        headers: buildHeaders(),
+    });
     if (!response.ok) {
         throw new Error(`API Error: ${response.status} ${response.statusText}`);
     }
@@ -13,7 +38,7 @@ async function get<T>(url: string): Promise<T> {
 async function post<T>(url: string, body?: unknown): Promise<T> {
     const response = await fetch(`${API_BASE}${url}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: buildHeaders({ "Content-Type": "application/json" }),
         body: body ? JSON.stringify(body) : undefined,
     });
     if (!response.ok) {
@@ -25,7 +50,7 @@ async function post<T>(url: string, body?: unknown): Promise<T> {
 async function put<T>(url: string, body: unknown): Promise<T> {
     const response = await fetch(`${API_BASE}${url}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: buildHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(body),
     });
     if (!response.ok) {
@@ -35,8 +60,8 @@ async function put<T>(url: string, body: unknown): Promise<T> {
 }
 
 export const api = {
-    initLibrary: (path: string, name: string) =>
-        post<LibraryInfo>("/api/library/init", { path, name }),
+    initLibrary: (path: string, name: string, password?: string) =>
+        post<LibraryInfo>("/api/library/init", { path, name, ...(password ? { password } : {}) }),
     getLibraryInfo: () => get<LibraryInfo>("/api/library/info"),
     scanAssets: () => post<ScanResult>("/api/assets/scan"),
     resolveTagConflicts: (resolutions: { tagValue: string; chosenType: string }[]) =>
@@ -48,13 +73,17 @@ export const api = {
         post<{ path: string }>("/api/library/rename-directory", { relativePath, newName }),
     deleteDirectory: (relativePath: string) =>
         post<{ success: boolean }>("/api/library/delete-directory", { relativePath }),
-    uploadAssets: async (files: File[], targetDir: string, keepFilename?: boolean) => {
+    uploadAssets: async (files: File[], targetDir: string, keepFilename?: boolean, tags?: AssetTag[]) => {
         const formData = new FormData()
         files.forEach((f) => formData.append("files", f))
         formData.append("targetDir", targetDir)
         formData.append("keepFilename", String(keepFilename ?? false))
+        if (tags && tags.length > 0) {
+            formData.append("tags", JSON.stringify(tags))
+        }
         const res = await fetch(API_BASE + "/api/assets/upload", {
             method: "POST",
+            headers: buildHeaders(),
             body: formData,
         })
         if (!res.ok) throw new Error("Upload failed")
@@ -81,7 +110,7 @@ export const api = {
     moveAsset: (id: string, targetFolder: string) =>
         post<AssetDetailDto>(`/api/assets/${id}/move`, { targetFolder }),
     deleteAsset: (id: string) =>
-        fetch(`${API_BASE}/api/assets/${id}`, { method: "DELETE" }).then((r) => {
+        fetch(`${API_BASE}/api/assets/${id}`, { method: "DELETE", headers: buildHeaders() }).then((r) => {
             if (!r.ok) throw new Error("Delete failed")
         }),
     checkLibraryPath: (path: string) =>
@@ -91,7 +120,7 @@ export const api = {
     loadLibrary: (id: string) => post<LibraryInfo>(`/api/library/load/${id}`),
     getTagConflicts: () => get<TagConflict[]>("/api/assets/tag-conflicts"),
     removeLibrary: (id: string) =>
-        fetch(`${API_BASE}/api/libraries/${id}`, { method: "DELETE" }).then((r) => {
+        fetch(`${API_BASE}/api/libraries/${id}`, { method: "DELETE", headers: buildHeaders() }).then((r) => {
             if (!r.ok) throw new Error("Remove failed")
         }),
     getDrives: () => get<ServerDrive[]>("/api/fs/drives"),
@@ -108,4 +137,17 @@ export const api = {
         post<{ success: boolean }>("/api/assets/delete-tag", { value }),
     saveCategoryOrder: (order: string[]) =>
         post<{ success: boolean }>("/api/library/category-order", { order }),
+    unlockLibrary: async (id: string, password: string) => {
+        const result = await post<{ library: LibraryInfo; token: string }>("/api/library/unlock", { password });
+        setToken(result.token);
+        return result.library;
+    },
+    lockLibrary: () =>
+        post<{ message: string }>("/api/library/lock"),
+    getUnlockStatus: () =>
+        get<{ unlocked: boolean; remainingSeconds: number }>("/api/library/unlock-status"),
+    decryptLibrary: (password?: string) =>
+        post<{ message: string; decryptedCount: number }>("/api/library/decrypt", { password }),
+    encryptLibrary: (password: string) =>
+        post<{ message: string; encryptedCount: number }>("/api/library/encrypt", { password }),
 };

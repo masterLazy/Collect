@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Collect.Core.Models;
 
@@ -6,6 +7,7 @@ namespace Collect.Core.Services;
 /// <summary>
 /// Manages library initialization and metadata persistence.
 /// The library path is stored in-memory and in .collect/library.json on disk.
+/// Supports encrypted libraries with AES-256-GCM (key held in memory after unlock).
 /// </summary>
 public class LibraryService : ILibraryService
 {
@@ -19,9 +21,21 @@ public class LibraryService : ILibraryService
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"
     };
 
-    private string? _libraryPath;
+    private readonly IEncryptionService _encryptionService;
 
-    public async Task<LibraryInfo> InitializeAsync(string path, string? name = null)
+    private string? _libraryPath;
+    private readonly ConcurrentDictionary<string, UnlockSession> _sessions = new();
+    // All keys ever created — never cleared, used for repair decryption
+    private readonly List<byte[]> _allSessionKeys = new();
+
+    private record UnlockSession(byte[] EncryptionKey, DateTime UnlockedAt);
+
+    public LibraryService(IEncryptionService encryptionService)
+    {
+        _encryptionService = encryptionService;
+    }
+
+    public async Task<LibraryInfo> InitializeAsync(string path, string? name = null, string? password = null)
     {
         var collectDir = Path.Combine(path, ".collect");
         var thumbnailsDir = Path.Combine(collectDir, "thumbnails");
@@ -47,6 +61,9 @@ public class LibraryService : ILibraryService
                     await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(existingInfo, JsonOptions));
                 }
                 _libraryPath = path;
+                // Clear sessions when switching to a non-encrypted library
+                if (!existingInfo.IsEncrypted)
+                    _sessions.Clear();
 
                 // Register this library
                 await RegisterLibraryAsync(existingInfo);
@@ -64,6 +81,19 @@ public class LibraryService : ILibraryService
             CreatedAt = DateTime.UtcNow,
             AssetCount = 0
         };
+
+        // Handle optional encryption
+        if (!string.IsNullOrEmpty(password))
+        {
+            var (salt, verificationHash, encryptionKey) = _encryptionService.CreateKey(password);
+            info.IsEncrypted = true;
+            info.Salt = Convert.ToBase64String(salt);
+            info.VerificationHash = Convert.ToBase64String(verificationHash);
+            var token = Guid.NewGuid().ToString("N");
+            _sessions[token] = new UnlockSession(encryptionKey, DateTime.UtcNow);
+            _allSessionKeys.Add(encryptionKey);
+        }
+
         await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
 
         _libraryPath = path;
@@ -411,6 +441,17 @@ public class LibraryService : ILibraryService
             if (currentInfo is not null &&
                 (currentInfo.Id == id || currentInfo.Id.StartsWith(id, StringComparison.OrdinalIgnoreCase)))
             {
+                // If encrypted and no valid session, clear sessions
+                if (currentInfo.IsEncrypted)
+                {
+                    if (!IsLibraryUnlocked())
+                        _sessions.Clear();
+                }
+                else
+                {
+                    _sessions.Clear();
+                }
+
                 return currentInfo;
             }
         }
@@ -423,9 +464,160 @@ public class LibraryService : ILibraryService
 
         // 3. Set in-memory path and return lightweight info
         _libraryPath = entry.Path;
-        return ReadInfoFromPath(entry.Path) ?? entry;
+
+        var info = ReadInfoFromPath(entry.Path) ?? entry;
+
+        // If encrypted within 10-min window, keep the key; otherwise clear it
+        if (info.IsEncrypted)
+        {
+            if (!IsLibraryUnlocked())
+                _sessions.Clear();
+        }
+        else
+        {
+            _sessions.Clear();
+        }
+
+        return info;
     }
 
+    // ──────────────────────────────────────────────
+    //  Encryption Support
+    // ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Unlock an encrypted library by verifying the password against the stored salt and hash.
+    /// On success, a session token is created and the encryption key is held in memory
+    /// for 10 minutes. Returns (info, token).
+    /// </summary>
+    public async Task<(LibraryInfo? Info, string? Token)> UnlockAsync(string password)
+    {
+        var info = await GetInfoAsync();
+        if (info is null || !info.IsEncrypted)
+            return (info, null)!;
+
+        if (string.IsNullOrEmpty(info.Salt) || string.IsNullOrEmpty(info.VerificationHash))
+            return (null, null!);
+
+        var salt = Convert.FromBase64String(info.Salt);
+        var storedHash = Convert.FromBase64String(info.VerificationHash);
+
+        var (valid, encryptionKey) = _encryptionService.VerifyPassword(password, salt, storedHash);
+        if (!valid || encryptionKey is null)
+            return (null, null!);
+
+        var token = Guid.NewGuid().ToString("N");
+        _sessions[token] = new UnlockSession(encryptionKey, DateTime.UtcNow);
+        _allSessionKeys.Add(encryptionKey);
+        return (info, token);
+    }
+
+    /// <summary>
+    /// Check if the current library is unlocked and get remaining unlock time.
+    /// When token is provided, checks that specific session; otherwise checks any valid session.
+    /// </summary>
+    public Task<(bool Unlocked, int RemainingSeconds)> GetUnlockStatusAsync(string? token = null)
+    {
+        if (token is not null)
+        {
+            if (!_sessions.TryGetValue(token, out var session))
+                return Task.FromResult((false, 0));
+            var elapsed = DateTime.UtcNow - session.UnlockedAt;
+            var remaining = (int)(600 - elapsed.TotalSeconds);
+            if (remaining <= 0)
+            {
+                _sessions.TryRemove(token, out _);
+                return Task.FromResult((false, 0));
+            }
+            return Task.FromResult((true, remaining));
+        }
+
+        // Check any valid session (backward compatibility)
+        foreach (var kvp in _sessions)
+        {
+            var elapsed = DateTime.UtcNow - kvp.Value.UnlockedAt;
+            var remaining = (int)(600 - elapsed.TotalSeconds);
+            if (remaining > 0)
+                return Task.FromResult((true, remaining));
+        }
+        return Task.FromResult((false, 0));
+    }
+
+    /// <summary>
+    /// Check if the current library is encrypted by reading its metadata.
+    /// </summary>
+    public bool IsEncryptedLibrary()
+    {
+        var info = ReadInfoFromPath(_libraryPath ?? "");
+        return info?.IsEncrypted ?? false;
+    }
+
+    /// <summary>
+    /// Check if the encryption key is available (library is unlocked for this session).
+    /// When token is provided, checks that specific session; otherwise checks any valid session.
+    /// Key persists for 10 minutes in memory after unlock.
+    /// </summary>
+    public bool IsLibraryUnlocked(string? token = null)
+    {
+        if (token is not null)
+        {
+            if (!_sessions.TryGetValue(token, out var session)) return false;
+            if (DateTime.UtcNow - session.UnlockedAt > TimeSpan.FromMinutes(10))
+            {
+                _sessions.TryRemove(token, out _);
+                return false;
+            }
+            return true;
+        }
+
+        // Check any valid session (backward compatibility)
+        foreach (var kvp in _sessions)
+        {
+            if (DateTime.UtcNow - kvp.Value.UnlockedAt <= TimeSpan.FromMinutes(10))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Get the current encryption key, or null if not available.
+    /// When token is provided, returns the key for that specific session;
+    /// otherwise returns the first valid key (backward compatibility).
+    /// </summary>
+    public byte[]? GetEncryptionKey(string? token = null)
+    {
+        if (token is not null)
+        {
+            if (_sessions.TryGetValue(token, out var session))
+                return session.EncryptionKey;
+            return null;
+        }
+
+        // Return first valid key (backward compatibility)
+        foreach (var kvp in _sessions)
+        {
+            if (DateTime.UtcNow - kvp.Value.UnlockedAt <= TimeSpan.FromMinutes(10))
+                return kvp.Value.EncryptionKey;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Lock the library by clearing the encryption key from memory.
+    /// When token is provided, only that session is locked; otherwise all sessions are cleared.
+    /// The library remains the current library, but asset access requires re-unlock.
+    /// </summary>
+    public void LockLibrary(string? token = null)
+    {
+        if (token is not null)
+            _sessions.TryRemove(token, out _);
+        else
+            _sessions.Clear();
+    }
+    /// <summary>
+    /// Get all encryption keys that have been created in this session (for repair decryption).
+    /// </summary>
+    public IEnumerable<byte[]> GetAllKnownKeys() => _allSessionKeys;
     private async Task RegisterLibraryAsync(LibraryInfo info)
     {
         var filePath = LibrariesRegistryPath;
@@ -440,6 +632,12 @@ public class LibraryService : ILibraryService
             existing.Name = info.Name;
             existing.Path = info.Path;
             existing.AssetCount = info.AssetCount;
+            existing.IsEncrypted = info.IsEncrypted;
+            if (!info.IsEncrypted)
+            {
+                existing.Salt = null;
+                existing.VerificationHash = null;
+            }
         }
         else
         {

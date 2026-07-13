@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react"
-import { Box, Button, Field, HStack, Input, Stack, Tag, Text } from "@chakra-ui/react"
+import { Box, Button, Field, HStack, Input, Stack, Text } from "@chakra-ui/react"
 import { Tooltip } from "./ui/tooltip"
+import { TagBadge } from "./TagBadge"
 import { api } from "../services/api"
 import type { AssetDetailDto, AssetTag } from "../types"
 
@@ -11,31 +12,6 @@ interface TagEditorProps {
     onTagClick?: (value: string) => void
     selectedTags?: string[]
     onTagsSaved?: (updatedAsset: AssetDetailDto) => void
-}
-
-// Deterministic color map for tag types
-const TYPE_COLORS: Record<string, string> = {
-    "画师": "blue",
-    "人物": "green",
-    "作品": "purple",
-    "系列": "orange",
-    "风格": "pink",
-    "主题": "teal",
-    "出处": "cyan",
-    "角色": "yellow",
-}
-
-const DEFAULT_COLOR_CYCLE = ["blue", "green", "purple", "orange", "pink", "teal", "cyan", "yellow"]
-
-// Simple string hash to pick a deterministic color
-function getTypeColor(type: string): string {
-    if (TYPE_COLORS[type]) return TYPE_COLORS[type]
-    let hash = 0
-    for (let i = 0; i < type.length; i++) {
-        hash = ((hash << 5) - hash) + type.charCodeAt(i)
-        hash |= 0
-    }
-    return DEFAULT_COLOR_CYCLE[Math.abs(hash) % DEFAULT_COLOR_CYCLE.length]
 }
 
 function CheckIcon() {
@@ -72,12 +48,21 @@ function XIcon() {
     )
 }
 
+function EditIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+        </svg>
+    )
+}
+
 export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTags = [], onTagsSaved }: TagEditorProps) {
     const [initialTags, setInitialTags] = useState<AssetTag[]>([])
     const [inputValue, setInputValue] = useState("")
     const [suggestions, setSuggestions] = useState<string[]>([])
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [saving, setSaving] = useState(false)
+    const [deleteMode, setDeleteMode] = useState(false)
     const [inputFocused, setInputFocused] = useState(false)
     const [highlightedIndex, setHighlightedIndex] = useState(-1)
     const inputRef = useRef<HTMLInputElement>(null)
@@ -92,140 +77,96 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
     const hasChanges = tags.length !== initialTags.length ||
         tags.some((t, i) => t.value !== initialTags[i]?.value || t.type !== initialTags[i]?.type)
 
+    // Load tag suggestions — 50 items, no scroll-to-load-more
     useEffect(() => {
         let cancelled = false
-        api.getTags(1, 9999).then((res) => {
-            if (cancelled) return
 
-            const usedValues = new Set(tags.map((t) => t.value.toLowerCase()))
-
-            // Build a map of tag value -> type from API response
-            const typeMap = new Map<string, string | null>()
-            for (const group of res.groups) {
-                for (const tag of group.tags) {
-                    typeMap.set(tag.value, group.type)
-                }
-            }
-            tagDataByValue.current = typeMap
-
-            if (inputValue.length > 0) {
+        const loadSuggestions = async () => {
+            try {
+                const usedValues = new Set(tags.map((t) => t.value.toLowerCase()))
                 const partialCategory = inputValue.match(/^\[([^\]]*)$/)
                 const completeCategory = inputValue.match(/^\[([^\]]+)\](.*)$/)
 
+                let newSuggestions: string[] = []
+
                 if (partialCategory) {
                     // Case 1: Typing inside brackets [partial → show category suggestions
+                    // Load without search param so we can filter group names client-side
+                    const result = await api.getTags(1, 50)
+                    if (cancelled) return
+                    // Build type map from response
+                    const typeMap = new Map<string, string | null>()
+                    for (const group of result.groups) {
+                        for (const tag of group.tags) {
+                            typeMap.set(tag.value, group.type)
+                        }
+                    }
+                    tagDataByValue.current = typeMap
                     const partial = partialCategory[1].toLowerCase()
-                    const categorySuggestions = res.groups
+                    newSuggestions = result.groups
                         .filter(g => g.type !== null && g.type.toLowerCase().includes(partial))
                         .map(g => `[${g.type}]`)
-                    setSuggestions(categorySuggestions.slice(0, 10))
-                    setShowSuggestions(inputFocused && categorySuggestions.length > 0)
                 } else if (completeCategory) {
                     // Case 2: Complete category bracket [Type]partial → show value suggestions for that category
+                    // Load without search param, filter client-side by group type
+                    const result = await api.getTags(1, 50)
+                    if (cancelled) return
+                    // Build type map from response
+                    const typeMap = new Map<string, string | null>()
+                    for (const group of result.groups) {
+                        for (const tag of group.tags) {
+                            typeMap.set(tag.value, group.type)
+                        }
+                    }
+                    tagDataByValue.current = typeMap
                     const categoryType = completeCategory[1]
                     const valuePartial = completeCategory[2].toLowerCase()
-                    const group = res.groups.find(g => g.type === categoryType)
+                    const group = result.groups.find(g => g.type === categoryType)
                     if (group) {
                         const usedVals = new Set(tags.map(t => t.value.toLowerCase()))
-                        const filtered = group.tags
+                        newSuggestions = group.tags
                             .filter(t => !usedVals.has(t.value.toLowerCase()) && t.value.toLowerCase().includes(valuePartial))
                             .map(t => t.value)
-                        setSuggestions(filtered.slice(0, 10))
-                        setShowSuggestions(inputFocused && filtered.length > 0)
-                    } else {
-                        setSuggestions([])
-                        setShowSuggestions(false)
                     }
                 } else {
-                    // Existing logic for regular text search (no bracket)
-                    const query = inputValue.toLowerCase()
-
-                    interface ScoredSuggestion { value: string; score: number }
-                    const scored: ScoredSuggestion[] = []
-
-                    for (const group of res.groups) {
-                        const typeMatch = group.type !== null && group.type.toLowerCase().includes(query)
+                    // Normal search or empty input — pass search term to API for server-side filtering
+                    const searchTerm = inputValue || undefined
+                    const result = await api.getTags(1, 50, searchTerm)
+                    if (cancelled) return
+                    // Build type map from response
+                    const typeMap = new Map<string, string | null>()
+                    for (const group of result.groups) {
                         for (const tag of group.tags) {
-                            if (usedValues.has(tag.value.toLowerCase())) continue
-                            const valueMatch = tag.value.toLowerCase().includes(query)
-                            if (valueMatch || typeMatch) {
-                                // Higher score = better match
-                                // Exact match first, then startsWith, then includes, then type-only match
-                                let score = 0
-                                if (valueMatch) {
-                                    const lc = tag.value.toLowerCase()
-                                    if (lc === query) score = 100
-                                    else if (lc.startsWith(query)) score = 80
-                                    else score = 60
-                                } else if (typeMatch) {
-                                    // Type-only match: also boost by how many chars of the value match
-                                    score = 40
-                                }
-                                scored.push({ value: tag.value, score })
+                            typeMap.set(tag.value, group.type)
+                        }
+                    }
+                    tagDataByValue.current = typeMap
+                    // Flatten all tag values from response, filtering used ones
+                    for (const group of result.groups) {
+                        for (const tag of group.tags) {
+                            if (!usedValues.has(tag.value.toLowerCase())) {
+                                newSuggestions.push(tag.value)
                             }
                         }
                     }
-
-                    scored.sort((a, b) => b.score - a.score)
-                    setSuggestions(scored.slice(0, 10).map((s) => s.value))
-                    setShowSuggestions(inputFocused && scored.length > 0)
-                }
-            } else {
-                // Empty input: distribute suggestions across groups for diversity
-                const MAX_TOTAL = 10
-                const PER_GROUP = 3
-                const result: string[] = []
-                const allTagEntries: { value: string; groupIndex: number }[] = []
-
-                res.groups.forEach((group, gi) => {
-                    const available = group.tags
-                        .map((t) => t.value)
-                        .filter((v) => !usedValues.has(v.toLowerCase()))
-                    // Take PER_GROUP from each group first
-                    const taken = available.slice(0, PER_GROUP)
-                    result.push(...taken)
-                    // Remember leftovers for filling
-                    available.slice(PER_GROUP).forEach((v) => allTagEntries.push({ value: v, groupIndex: gi }))
-                })
-
-                // If we have room, fill remaining slots round-robin from leftovers
-                if (result.length < MAX_TOTAL && allTagEntries.length > 0) {
-                    // Group leftovers by group for round-robin
-                    const byGroup = new Map<number, string[]>()
-                    for (const entry of allTagEntries) {
-                        const list = byGroup.get(entry.groupIndex) ?? []
-                        list.push(entry.value)
-                        byGroup.set(entry.groupIndex, list)
-                    }
-                    const groupIds = Array.from(byGroup.keys())
-                    let idx = 0
-                    while (result.length < MAX_TOTAL) {
-                        const gid = groupIds[idx % groupIds.length]
-                        const remaining = byGroup.get(gid)!
-                        if (remaining.length > 0) {
-                            result.push(remaining.shift()!)
-                        }
-                        idx++
-                        // Safety: break if we've exhausted all groups
-                        if (Array.from(byGroup.values()).every((arr) => arr.length === 0)) break
-                    }
                 }
 
-                setSuggestions(result.slice(0, MAX_TOTAL))
-                setShowSuggestions(inputFocused && result.length > 0)
+                setSuggestions(newSuggestions)
+                setShowSuggestions(inputFocused && newSuggestions.length > 0)
+                setHighlightedIndex(-1)
+            } catch {
+                // ignore
             }
-        }).catch(() => { })
+        }
+
+        if (inputFocused) {
+            loadSuggestions()
+        } else {
+            setShowSuggestions(false)
+        }
+
         return () => { cancelled = true }
     }, [inputValue, tags, inputFocused])
-
-    // Reset highlighted index when suggestions change
-    const prevSuggestionsLength = useRef(0)
-    useEffect(() => {
-        if (suggestions.length !== prevSuggestionsLength.current) {
-            setHighlightedIndex(-1)
-            prevSuggestionsLength.current = suggestions.length
-        }
-    }, [suggestions])
 
     const handleFocus = () => {
         if (blurTimerRef.current) clearTimeout(blurTimerRef.current)
@@ -237,42 +178,52 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
         blurTimerRef.current = setTimeout(() => setInputFocused(false), 150)
     }
 
-    const handleAddTag = (value: string) => {
+    const handleAddTag = (value: string, splitOnDash = false) => {
         const trimmed = value.trim()
         if (!trimmed) return
 
-        // Try to parse [Type]Value bracket syntax first
-        const bracketMatch = trimmed.match(/^\[([^\]]+)\](.+)$/)
-        let extractedValue: string
-        let extractedType: string | null
+        // Split by "-" separator if requested
+        const segments = splitOnDash && trimmed.includes('-')
+            ? trimmed.split('-').map(s => s.trim()).filter(Boolean)
+            : [trimmed]
 
-        if (bracketMatch) {
-            extractedType = bracketMatch[1]
-            extractedValue = bracketMatch[2].trim()
-        } else {
-            extractedValue = trimmed
-            // Look up type from API data (preserve type when adding via suggestion)
-            extractedType = tagDataByValue.current.get(extractedValue) ?? null
+        let currentTags = [...tags]
+
+        for (const segment of segments) {
+            // Try to parse [Type]Value bracket syntax first
+            const bracketMatch = segment.match(/^\[([^\]]+)\](.+)$/)
+            let extractedValue: string
+            let extractedType: string | null
+
+            if (bracketMatch) {
+                extractedType = bracketMatch[1]
+                extractedValue = bracketMatch[2].trim()
+            } else {
+                extractedValue = segment
+                // Look up type from API data (preserve type when adding via suggestion)
+                extractedType = tagDataByValue.current.get(extractedValue) ?? null
+            }
+
+            if (!extractedValue) continue
+
+            // Check for duplicate (type, value) pair
+            if (currentTags.some((t) => t.value === extractedValue && t.type === extractedType)) continue
+
+            const newTag: AssetTag = { type: extractedType, value: extractedValue }
+
+            if (extractedType !== null) {
+                // Categorized tag: insert after the last existing categorized tag
+                const lastCategorizedIdx = currentTags.map((t, i) => t.type !== null ? i : -1).reduce((last, i) => Math.max(last, i), -1)
+                const insertAt = lastCategorizedIdx + 1
+                currentTags.splice(insertAt, 0, newTag)
+            } else {
+                // Uncategorized tag: append at the end
+                currentTags.push(newTag)
+            }
         }
 
-        if (!extractedValue) return
-
-        // Check for duplicate (type, value) pair
-        if (tags.some((t) => t.value === extractedValue && t.type === extractedType)) return
-
-        const newTag: AssetTag = { type: extractedType, value: extractedValue }
-
-        if (extractedType !== null) {
-            // Categorized tag: insert after the last existing categorized tag
-            const lastCategorizedIdx = tags.map((t, i) => t.type !== null ? i : -1).reduce((last, i) => Math.max(last, i), -1)
-            const insertAt = lastCategorizedIdx + 1
-            const newTags = [...tags]
-            newTags.splice(insertAt, 0, newTag)
-            onTagsChange(newTags)
-        } else {
-            // Uncategorized tag: append at the end
-            const newTags = [...tags, newTag]
-            onTagsChange(newTags)
+        if (currentTags.length !== tags.length || JSON.stringify(currentTags) !== JSON.stringify(tags)) {
+            onTagsChange(currentTags)
         }
 
         setInputValue("")
@@ -305,7 +256,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
         if (!showSuggestions || suggestions.length === 0) {
             if (e.key === "Enter") {
                 e.preventDefault()
-                handleAddTag(inputValue)
+                handleAddTag(inputValue, true)
             }
             return
         }
@@ -331,7 +282,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                     handleAddTag(s)
                 }
             } else {
-                handleAddTag(inputValue)
+                handleAddTag(inputValue, true)
             }
         } else if (e.key === "Escape") {
             setShowSuggestions(false)
@@ -357,34 +308,36 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                         <Text color="red.400" fontWeight="bold" fontSize="sm" lineHeight="1">*</Text>
                     )}
                 </HStack>
-                <HStack
-                    gap="1"
-                    opacity={hasChanges ? 1 : 0}
-                    transition="opacity 0.15s"
-                    flexShrink="0"
-                >
-                    <Button
-                        size="xs"
-                        variant="ghost"
-                        colorPalette="accent"
-                        loading={saving}
-                        onClick={handleSave}
-                        disabled={!hasChanges}
-                        px="1.5"
+                {onTagsSaved && (
+                    <HStack
+                        gap="1"
+                        opacity={hasChanges ? 1 : 0}
+                        transition="opacity 0.15s"
+                        flexShrink="0"
                     >
-                        <CheckIcon />
-                    </Button>
-                    <Button
-                        size="xs"
-                        variant="ghost"
-                        colorPalette="red"
-                        onClick={handleUndo}
-                        disabled={!hasChanges}
-                        px="1.5"
-                    >
-                        <UndoIcon />
-                    </Button>
-                </HStack>
+                        <Button
+                            size="xs"
+                            variant="ghost"
+                            colorPalette="accent"
+                            loading={saving}
+                            onClick={handleSave}
+                            disabled={!hasChanges}
+                            px="1.5"
+                        >
+                            <CheckIcon />
+                        </Button>
+                        <Button
+                            size="xs"
+                            variant="ghost"
+                            colorPalette="red"
+                            onClick={handleUndo}
+                            disabled={!hasChanges}
+                            px="1.5"
+                        >
+                            <UndoIcon />
+                        </Button>
+                    </HStack>
+                )}
             </HStack>
 
             <HStack gap="2" flexWrap="wrap">
@@ -401,8 +354,16 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                     if (!a.type && b.type) return 1
                     return 0
                 }).map((tag) => {
-                    const colorPalette = tag.type ? getTypeColor(tag.type) : "accent"
                     const isInFilter = selectedTags.includes(tag.value)
+                    const badge = (
+                        <TagBadge
+                            value={tag.value}
+                            type={tag.type}
+                            isSelected={isInFilter}
+                            variant="subtle"
+                            onClick={onTagClick ? () => onTagClick(tag.value) : undefined}
+                        />
+                    )
                     return (
                         <Box
                             key={(tag.type ?? "") + ":" + tag.value}
@@ -418,65 +379,56 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                                     closeOnPointerDown={false}
                                     lazyMount
                                 >
-                                    <Tag.Root
-                                        size="lg"
-                                        colorPalette={colorPalette}
-                                        variant={isInFilter ? "solid" : "subtle"}
-                                        borderRadius="full"
-                                        display="inline-flex"
-                                        alignItems="center"
-                                        px="2.5"
-                                        py="1"
-                                        cursor={onTagClick ? "pointer" : "default"}
-                                        onClick={onTagClick ? () => onTagClick(tag.value) : undefined}
-                                        opacity={tag.type ? 0.85 : 1}
-                                    >
-                                        <Tag.Label fontSize="sm">{tag.value}</Tag.Label>
-                                    </Tag.Root>
+                                    {badge}
                                 </Tooltip>
                             ) : (
-                                <Tag.Root
-                                    size="lg"
-                                    colorPalette="accent"
-                                    variant={isInFilter ? "solid" : "subtle"}
-                                    borderRadius="full"
-                                    display="inline-flex"
-                                    alignItems="center"
-                                    px="2.5"
-                                    py="1"
-                                    cursor={onTagClick ? "pointer" : "default"}
-                                    onClick={onTagClick ? () => onTagClick(tag.value) : undefined}
-                                    opacity={0.85}
-                                >
-                                    <Tag.Label fontSize="sm">{tag.value}</Tag.Label>
-                                </Tag.Root>
+                                badge
                             )}
-                            <Box
-                                as="button"
-                                onClick={() => handleRemoveTag(tag.value, tag.type)}
-                                position="absolute"
-                                top="-1.5"
-                                right="-1.5"
-                                bg="bg"
-                                border="1px solid"
-                                borderColor="border"
-                                borderRadius="full"
-                                width="5"
-                                height="5"
-                                display="flex"
-                                alignItems="center"
-                                justifyContent="center"
-                                opacity="0"
-                                _groupHover={{ opacity: 1 }}
-                                _hover={{ opacity: 1, bg: "bg.subtle", cursor: "pointer" }}
-                                aria-label={"Remove tag " + tag.value}
-                                zIndex="1"
-                            >
-                                <XIcon />
-                            </Box>
+                            {deleteMode && (
+                                <Box
+                                    as="button"
+                                    onClick={() => handleRemoveTag(tag.value, tag.type)}
+                                    position="absolute"
+                                    top="-1.5"
+                                    right="-1.5"
+                                    bg="bg"
+                                    border="1px solid"
+                                    borderColor="border"
+                                    borderRadius="full"
+                                    width="5"
+                                    height="5"
+                                    display="flex"
+                                    alignItems="center"
+                                    justifyContent="center"
+                                    _hover={{ bg: "bg.subtle", cursor: "pointer" }}
+                                    aria-label={"Remove tag " + tag.value}
+                                    zIndex="1"
+                                >
+                                    <XIcon />
+                                </Box>
+                            )}
                         </Box>
                     )
                 })}
+                {/* Edit/exit icon to toggle delete mode — always visible at the end */}
+                {tags.length > 0 && (
+                    <Box
+                        as="button"
+                        onClick={() => setDeleteMode((prev) => !prev)}
+                        display="inline-flex"
+                        alignItems="center"
+                        justifyContent="center"
+                        width="6"
+                        height="6"
+                        borderRadius="md"
+                        color={deleteMode ? { _light: "red.500", _dark: "red.400" } : "fg.subtle"}
+                        opacity={deleteMode ? 1 : 0.5}
+                        _hover={{ opacity: 1, bg: "bg.subtle", cursor: "pointer" }}
+                        aria-label={deleteMode ? "Done editing tags" : "Edit tags"}
+                    >
+                        {deleteMode ? <XIcon /> : <EditIcon />}
+                    </Box>
+                )}
             </HStack>
 
             <Field.Root>
@@ -500,7 +452,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                             size="sm"
                             variant="outline"
                             colorPalette="accent"
-                            onClick={() => handleAddTag(inputValue)}
+                            onClick={() => handleAddTag(inputValue, true)}
                             disabled={!inputValue.trim()}
                             width="36px"
                             p="0"

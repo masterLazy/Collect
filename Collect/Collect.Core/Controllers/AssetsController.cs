@@ -10,10 +10,17 @@ namespace Collect.Core.Controllers;
 public class AssetsController : ControllerBase
 {
     private readonly IAssetService _assetService;
+    private readonly ILibraryService _libraryService;
+    private readonly IEncryptionService _encryptionService;
 
-    public AssetsController(IAssetService assetService)
+    public AssetsController(
+        IAssetService assetService,
+        ILibraryService libraryService,
+        IEncryptionService encryptionService)
     {
         _assetService = assetService;
+        _libraryService = libraryService;
+        _encryptionService = encryptionService;
     }
 
     /// <summary>
@@ -70,23 +77,34 @@ public class AssetsController : ControllerBase
         return Ok(detail);
     }
 
+    private string? GetUnlockToken() =>
+        Request.Headers.TryGetValue("X-Unlock-Token", out var values) ? values.FirstOrDefault() : null;
+
     /// <summary>
     /// GET /api/assets/{id}/thumbnail
     /// Serve the thumbnail image for an asset (generates if missing).
+    /// Returns 403 if the library is encrypted and not unlocked.
     /// </summary>
     [HttpGet("{id}/thumbnail")]
     public async Task<IActionResult> GetThumbnail(string id)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var thumbPath = await _assetService.GetThumbnailPathAsync(id);
         if (thumbPath is null || !System.IO.File.Exists(thumbPath))
             return NotFound(new { error = "Thumbnail not available." });
 
+        // Prevent browser caching — ensures locked library thumbnails aren't served from cache
+        Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
         return PhysicalFile(thumbPath, "image/webp");
     }
 
     /// <summary>
     /// GET /api/assets/{id}/image
     /// Serve the original image file for an asset.
+    /// If the library is encrypted, decrypts the file before serving.
+    /// Returns 403 if the library is encrypted and not unlocked.
     /// </summary>
     [HttpGet("{id}/image")]
     public async Task<IActionResult> GetImage(string id)
@@ -99,6 +117,20 @@ public class AssetsController : ControllerBase
         if (filePath is null || !System.IO.File.Exists(filePath))
             return NotFound(new { error = "Image file not found on disk." });
 
+        // Check encryption status
+        if (_libraryService.IsEncryptedLibrary())
+        {
+            if (!_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+                return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
+            var encryptionKey = _libraryService.GetEncryptionKey(GetUnlockToken())
+                ?? throw new InvalidOperationException("Library is locked.");
+            var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
+            Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+            return File(decrypted, asset.MimeType);
+        }
+
+        Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
         return PhysicalFile(filePath, asset.MimeType);
     }
 
@@ -157,10 +189,14 @@ public class AssetsController : ControllerBase
     /// GET /api/assets/{id}/clipboard-image
     /// Return the asset's image as a PNG blob (resized to max 2000px on longest side),
     /// suitable for clipboard copying.
+    /// Returns 403 if the library is encrypted and not unlocked.
     /// </summary>
     [HttpGet("{id}/clipboard-image")]
     public async Task<IActionResult> GetClipboardImage(string id)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         try
         {
             var pngData = await _assetService.GetClipboardImageAsync(id);
@@ -199,12 +235,23 @@ public class AssetsController : ControllerBase
     public async Task<IActionResult> Upload(
         [FromForm] List<IFormFile> files,
         [FromForm] string targetDir,
-        [FromForm] bool keepFilename = false)
+        [FromForm] bool keepFilename = false,
+        [FromForm] string? tags = null)
     {
         if (files is null || files.Count == 0)
             return BadRequest(new { error = "No files provided." });
 
-        var result = await _assetService.UploadAssetsAsync(files, targetDir, keepFilename);
+        List<AssetTag>? parsedTags = null;
+        if (!string.IsNullOrEmpty(tags))
+        {
+            try
+            {
+                parsedTags = System.Text.Json.JsonSerializer.Deserialize<List<AssetTag>>(tags);
+            }
+            catch { }
+        }
+
+        var result = await _assetService.UploadAssetsAsync(files, targetDir, keepFilename, parsedTags);
         return Ok(result);
     }
 

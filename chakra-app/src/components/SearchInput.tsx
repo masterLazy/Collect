@@ -89,132 +89,105 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
         }
     }, [])
 
-    // Fetch autocomplete suggestions
+    // Fetch autocomplete suggestions — 50 items, no scroll-to-load-more
     useEffect(() => {
         let cancelled = false
 
-        // Determine the current tag segment being typed
-        const parsed = parseTagsPrefix(localValue)
-        const isTagsMode = parsed !== null
-        const currentSegment = parsed ? getCurrentTagPrefix(parsed.suffix) : localValue
-        const selectedValues = parsed ? getSelectedTagValues(parsed.suffix) : []
+        const loadSuggestions = async () => {
+            try {
+                const parsed = parseTagsPrefix(localValue)
+                const currentSegment = parsed ? getCurrentTagPrefix(parsed.suffix) : localValue
+                const selectedValues = parsed ? getSelectedTagValues(parsed.suffix) : []
 
-        // Check if current segment is in bracket mode: [Cat] or [Cat]val
-        const partialCategory = currentSegment.match(/^\[([^\]]*)$/)
-        const completeCategory = currentSegment.match(/^\[([^\]]+)\](.*)$/)
+                // Check if current segment is in bracket mode: [Cat] or [Cat]val
+                const partialCategory = currentSegment.match(/^\[([^\]]*)$/)
+                const completeCategory = currentSegment.match(/^\[([^\]]+)\](.*)$/)
 
-        if (partialCategory || completeCategory || localValue.startsWith('[')) {
-            // Bracket autocomplete
-            const bracketText = localValue.startsWith('[') ? localValue : currentSegment
-            const bracketPartial = bracketText.match(/^\[([^\]]*)$/)
-            const bracketComplete = bracketText.match(/^\[([^\]]+)\](.*)$/)
+                if (partialCategory || completeCategory || localValue.startsWith('[')) {
+                    // Bracket autocomplete — load without search param, filter client-side
+                    const bracketText = localValue.startsWith('[') ? localValue : currentSegment
+                    const bracketPartial = bracketText.match(/^\[([^\]]*)$/)
+                    const bracketComplete = bracketText.match(/^\[([^\]]+)\](.*)$/)
 
-            if (bracketPartial) {
-                api.getTags(1, 9999).then((res) => {
-                    if (cancelled) return
-                    const partial = bracketPartial![1].toLowerCase()
-                    const cats = res.groups
-                        .filter(g => g.type !== null && g.type.toLowerCase().includes(partial))
-                        .map(g => `[${g.type}]`)
-                    setSuggestions(cats.slice(0, 10).map(v => ({ value: v, type: null })))
-                    setShowSuggestions(inputFocused && cats.length > 0)
-                    setHighlightedIndex(-1)
-                }).catch(() => { })
-            } else if (bracketComplete) {
-                api.getTags(1, 9999).then((res) => {
-                    if (cancelled) return
-                    const categoryType = bracketComplete![1]
-                    const valuePartial = bracketComplete![2].toLowerCase()
-                    const group = res.groups.find(g => g.type === categoryType)
-                    if (group) {
-                        const filtered = group.tags
-                            .filter(t => t.value.toLowerCase().includes(valuePartial))
-                            .map(t => ({ value: t.value, type: group.type }))
-                        setSuggestions(filtered.slice(0, 10))
-                        setShowSuggestions(inputFocused && filtered.length > 0)
-                    } else {
-                        setSuggestions([])
-                        setShowSuggestions(false)
+                    if (bracketPartial) {
+                        const res = await api.getTags(1, 50)
+                        if (cancelled) return
+                        const partial = bracketPartial![1].toLowerCase()
+                        const cats = res.groups
+                            .filter(g => g.type !== null && g.type.toLowerCase().includes(partial))
+                            .map(g => `[${g.type}]`)
+                        setSuggestions(cats.slice(0, 10).map(v => ({ value: v, type: null })))
+                        setShowSuggestions(inputFocused && cats.length > 0)
+                        setHighlightedIndex(-1)
+                    } else if (bracketComplete) {
+                        const res = await api.getTags(1, 50)
+                        if (cancelled) return
+                        const categoryType = bracketComplete![1]
+                        const valuePartial = bracketComplete![2].toLowerCase()
+                        const group = res.groups.find(g => g.type === categoryType)
+                        if (group) {
+                            const filtered = group.tags
+                                .filter(t => t.value.toLowerCase().includes(valuePartial))
+                                .map(t => ({ value: t.value, type: group.type }))
+                            setSuggestions(filtered.slice(0, 10))
+                            setShowSuggestions(inputFocused && filtered.length > 0)
+                        } else {
+                            setSuggestions([])
+                            setShowSuggestions(false)
+                        }
+                        setHighlightedIndex(-1)
                     }
-                    setHighlightedIndex(-1)
-                }).catch(() => { })
-            }
-            return () => { cancelled = true }
-        }
-
-        if (!parsed) {
-            setShowSuggestions(false)
-            setSuggestions([])
-            return
-        }
-
-        api.getTags(1, 9999).then((res) => {
-            if (cancelled) return
-
-            const query = currentSegment.toLowerCase()
-            let matching: { value: string; type: string | null }[] = []
-
-            if (!query) {
-                // After + with empty prefix — show diverse available tags
-                const MAX_TOTAL = 10
-                const PER_GROUP = 3
-                const usedSet = new Set(selectedValues.map(v => v.toLowerCase()))
-                const result: { value: string; type: string | null }[] = []
-                const leftovers: { value: string; type: string | null; groupIndex: number }[] = []
-
-                res.groups.forEach((group, gi) => {
-                    const available = group.tags
-                        .filter(t => !usedSet.has(t.value.toLowerCase()))
-                        .map(t => ({ value: t.value, type: group.type }))
-                    result.push(...available.slice(0, PER_GROUP))
-                    available.slice(PER_GROUP).forEach(t => leftovers.push({ ...t, groupIndex: gi }))
-                })
-
-                if (result.length < MAX_TOTAL && leftovers.length > 0) {
-                    const byGroup = new Map<number, typeof leftovers>()
-                    for (const entry of leftovers) {
-                        const list = byGroup.get(entry.groupIndex) ?? []
-                        list.push(entry)
-                        byGroup.set(entry.groupIndex, list)
-                    }
-                    const groupIds = Array.from(byGroup.keys())
-                    let idx = 0
-                    while (result.length < MAX_TOTAL) {
-                        const gid = groupIds[idx % groupIds.length]
-                        const remaining = byGroup.get(gid)!
-                        if (remaining.length > 0) result.push(remaining.shift()!)
-                        idx++
-                        if (Array.from(byGroup.values()).every(arr => arr.length === 0)) break
-                    }
+                    return
                 }
 
-                matching = result.slice(0, MAX_TOTAL)
-            } else {
-                // Normal tag value search
+                if (!parsed) {
+                    setShowSuggestions(false)
+                    setSuggestions([])
+                    return
+                }
+
+                const query = currentSegment.toLowerCase()
+                const searchTerm = query || undefined
+                const res = await api.getTags(1, 50, searchTerm)
+                if (cancelled) return
+
+                const usedSet = new Set(selectedValues.map(v => v.toLowerCase()))
+                const matching: { value: string; type: string | null }[] = []
+
                 for (const group of res.groups) {
                     for (const tag of group.tags) {
-                        if (selectedValues.includes(tag.value)) continue
-                        if (tag.value.toLowerCase().includes(query)) {
+                        if (usedSet.has(tag.value.toLowerCase())) continue
+                        if (!query || tag.value.toLowerCase().includes(query)) {
                             matching.push({ value: tag.value, type: group.type })
                         }
                     }
                 }
 
-                matching.sort((a, b) => {
-                    const la = a.value.toLowerCase()
-                    const lb = b.value.toLowerCase()
-                    if (la === query) return -1
-                    if (lb === query) return 1
-                    if (la.startsWith(query) && !lb.startsWith(query)) return -1
-                    if (!la.startsWith(query) && lb.startsWith(query)) return 1
-                    return 0
-                })
-            }
+                if (query) {
+                    matching.sort((a, b) => {
+                        const la = a.value.toLowerCase()
+                        const lb = b.value.toLowerCase()
+                        if (la === query) return -1
+                        if (lb === query) return 1
+                        if (la.startsWith(query) && !lb.startsWith(query)) return -1
+                        if (!la.startsWith(query) && lb.startsWith(query)) return 1
+                        return 0
+                    })
+                }
 
-            setSuggestions(matching.slice(0, 10))
-            setShowSuggestions(inputFocused && matching.length > 0)
-            setHighlightedIndex(-1)
-        }).catch(() => { })
+                setSuggestions(matching)
+                setShowSuggestions(inputFocused && matching.length > 0)
+                setHighlightedIndex(-1)
+            } catch {
+                // ignore
+            }
+        }
+
+        if (inputFocused) {
+            loadSuggestions()
+        } else {
+            setShowSuggestions(false)
+        }
 
         return () => { cancelled = true }
     }, [localValue, inputFocused])

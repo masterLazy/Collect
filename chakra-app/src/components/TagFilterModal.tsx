@@ -13,6 +13,7 @@ import {
     Text,
 } from "@chakra-ui/react"
 import { api } from "../services/api"
+import { TagBadge } from "./TagBadge"
 import type { TagGroupsResponse } from "../types"
 
 interface TagFilterModalProps {
@@ -20,30 +21,6 @@ interface TagFilterModalProps {
     onTagsChange: (tags: string[]) => void
     onCategorizeSave?: () => void
     isMobile?: boolean
-}
-
-// Deterministic color map for tag types
-const TYPE_COLORS: Record<string, string> = {
-    "画师": "blue",
-    "人物": "green",
-    "作品": "purple",
-    "系列": "orange",
-    "风格": "pink",
-    "主题": "teal",
-    "出处": "cyan",
-    "角色": "yellow",
-}
-
-const DEFAULT_COLOR_CYCLE = ["blue", "green", "purple", "orange", "pink", "teal", "cyan", "yellow"]
-
-function getTypeColor(type: string): string {
-    if (TYPE_COLORS[type]) return TYPE_COLORS[type]
-    let hash = 0
-    for (let i = 0; i < type.length; i++) {
-        hash = ((hash << 5) - hash) + type.charCodeAt(i)
-        hash |= 0
-    }
-    return DEFAULT_COLOR_CYCLE[Math.abs(hash) % DEFAULT_COLOR_CYCLE.length]
 }
 
 function FilterIcon() {
@@ -254,8 +231,6 @@ const TagsPanel = memo(function TagsPanel({
                     <HStack gap="2" flexWrap="wrap">
                         {group.tags.map((t) => {
                             const isSelected = selectedTags.includes(t.value)
-                            const groupColor = group.type ? getTypeColor(group.type) : "gray"
-                            const colorPalette = groupColor
                             return (
                                 <Box
                                     key={t.value}
@@ -266,22 +241,13 @@ const TagsPanel = memo(function TagsPanel({
                                     draggable
                                     onDragStart={(e) => onTagDragStart(e, t.value, group.type)}
                                 >
-                                    <Tag.Root
-                                        size="lg"
-                                        colorPalette={colorPalette}
-                                        variant={isSelected ? "solid" : "subtle"}
-                                        borderRadius="full"
-                                        display="inline-flex"
-                                        alignItems="center"
-                                        px="2.5"
-                                        py="1"
-                                        opacity={group.type ? 0.85 : 1}
-                                    >
-                                        <Tag.Label fontSize="sm">{t.value}</Tag.Label>
-                                        <Text as="span" fontSize="xs" color={isSelected ? "white" : "fg.muted"} ml="1">
-                                            ({t.count})
-                                        </Text>
-                                    </Tag.Root>
+                                    <TagBadge
+                                        value={t.value}
+                                        type={group.type}
+                                        count={t.count}
+                                        isSelected={isSelected}
+                                        showCount
+                                    />
                                 </Box>
                             )
                         })}
@@ -1118,22 +1084,13 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
                                                             {paginatedCreateTags.map((t) => {
                                                                 const isSelected = selectedCreateTags.has(t.value)
                                                                 return (
-                                                                    <Box
+                                                                    <TagBadge
                                                                         key={t.value}
-                                                                        as="button"
-                                                                        px="2.5"
-                                                                        py="1"
-                                                                        borderRadius="full"
-                                                                        border="1px solid"
-                                                                        borderColor={isSelected ? "accent.solid" : "border"}
-                                                                        bg={isSelected ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
-                                                                        cursor="pointer"
+                                                                        value={t.value}
+                                                                        type={null}
+                                                                        isSelected={isSelected}
                                                                         onClick={() => handleToggleCreateTag(t.value)}
-                                                                        fontSize="sm"
-                                                                        _hover={{ borderColor: "accent.solid" }}
-                                                                    >
-                                                                        {t.value}
-                                                                    </Box>
+                                                                    />
                                                                 )
                                                             })}
                                                             {uncategorizedTags.length === 0 && (

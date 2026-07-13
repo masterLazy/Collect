@@ -81,6 +81,9 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
     const [pathPickerOpen, setPathPickerOpen] = useState(false)
     const [openBrowseOpen, setOpenBrowseOpen] = useState(false)
     const [removeConfirmId, setRemoveConfirmId] = useState<string | null>(null)
+    const [encryptLibrary, setEncryptLibrary] = useState(false)
+    const [password, setPassword] = useState("")
+    const [confirmPassword, setConfirmPassword] = useState("")
 
     const fetchLibraries = () => {
         api.getLibraries()
@@ -108,7 +111,7 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
         setCreating(true)
         setScanning(true)
         try {
-            const info = await api.initLibrary(path, name)
+            const info = await api.initLibrary(path, name, encryptLibrary ? password : undefined)
             await api.scanAssets()
             fetchLibraries()
             toaster.create({
@@ -243,9 +246,19 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
                                                         <FolderIcon />
                                                     </Box>
                                                     <VStack gap="0" align="start" flex="1" minW="0">
-                                                        <Text color="fg" fontWeight="medium" fontSize="sm" truncate>
-                                                            {lib.name}
-                                                        </Text>
+                                                        <HStack gap="1">
+                                                            {lib.isEncrypted && (
+                                                                <Box color="yellow.500" title="Encrypted" flexShrink="0">
+                                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                                                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                                                                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                                                                    </svg>
+                                                                </Box>
+                                                            )}
+                                                            <Text color="fg" fontWeight="medium" fontSize="sm" truncate>
+                                                                {lib.name}
+                                                            </Text>
+                                                        </HStack>
                                                         <Text color="fg.muted" fontSize="xs" truncate>
                                                             {lib.path}
                                                         </Text>
@@ -345,12 +358,57 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
                                                 Click Browse to pick a folder from the server, or type a path.
                                             </Field.HelperText>
                                         </Field.Root>
+                                        <Field.Root>
+                                            <Checkbox.Root
+                                                checked={encryptLibrary}
+                                                onCheckedChange={(e: { checked: boolean }) => setEncryptLibrary(!!e.checked)}
+                                            >
+                                                <Checkbox.HiddenInput />
+                                                <Checkbox.Control />
+                                                <Checkbox.Label color="fg" fontSize="sm">
+                                                    Encrypt this library
+                                                </Checkbox.Label>
+                                            </Checkbox.Root>
+                                        </Field.Root>
+                                        {encryptLibrary && (
+                                            <VStack gap="3" width="full">
+                                                <Field.Root>
+                                                    <Field.Label color="fg">Password</Field.Label>
+                                                    <Input
+                                                        type="password"
+                                                        placeholder="Enter password"
+                                                        value={password}
+                                                        onChange={(e) => setPassword(e.target.value)}
+                                                        bg="bg"
+                                                        border="1px solid"
+                                                        borderColor="border"
+                                                        required
+                                                    />
+                                                </Field.Root>
+                                                <Field.Root>
+                                                    <Field.Label color="fg">Confirm Password</Field.Label>
+                                                    <Input
+                                                        type="password"
+                                                        placeholder="Confirm password"
+                                                        value={confirmPassword}
+                                                        onChange={(e) => setConfirmPassword(e.target.value)}
+                                                        bg="bg"
+                                                        border="1px solid"
+                                                        required
+                                                        {...(confirmPassword && password !== confirmPassword ? { borderColor: "red.400" } : { borderColor: "border" })}
+                                                    />
+                                                    {confirmPassword && password !== confirmPassword && (
+                                                        <Field.ErrorText>Passwords do not match</Field.ErrorText>
+                                                    )}
+                                                </Field.Root>
+                                            </VStack>
+                                        )}
                                         <Button
                                             type="submit"
                                             colorPalette="accent"
                                             width="full"
                                             loading={creating}
-                                            disabled={!newName.trim() || !newPath.trim()}
+                                            disabled={!newName.trim() || !newPath.trim() || (encryptLibrary && (!password || password !== confirmPassword))}
                                         >
                                             Create and Scan
                                         </Button>
@@ -399,9 +457,19 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
                                                         <FolderIcon />
                                                     </Box>
                                                     <VStack gap="0" align="start" flex="1" minW="0">
-                                                        <Text color="fg" fontWeight="medium" fontSize="sm" truncate>
-                                                            {lib.name}
-                                                        </Text>
+                                                        <HStack gap="1">
+                                                            {lib.isEncrypted && (
+                                                                <Box color="yellow.500" title="Encrypted" flexShrink="0">
+                                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                                                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                                                                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                                                                    </svg>
+                                                                </Box>
+                                                            )}
+                                                            <Text color="fg" fontWeight="medium" fontSize="sm" truncate>
+                                                                {lib.name}
+                                                            </Text>
+                                                        </HStack>
                                                         <Text color="fg.muted" fontSize="xs" truncate>
                                                             {lib.path}
                                                         </Text>
@@ -503,12 +571,57 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
                                                     Click Browse to pick a folder from the server, or type a path.
                                                 </Field.HelperText>
                                             </Field.Root>
+                                            <Field.Root>
+                                                <Checkbox.Root
+                                                    checked={encryptLibrary}
+                                                    onCheckedChange={(e: { checked: boolean }) => setEncryptLibrary(!!e.checked)}
+                                                >
+                                                    <Checkbox.HiddenInput />
+                                                    <Checkbox.Control />
+                                                    <Checkbox.Label color="fg" fontSize="sm">
+                                                        Encrypt this library
+                                                    </Checkbox.Label>
+                                                </Checkbox.Root>
+                                            </Field.Root>
+                                            {encryptLibrary && (
+                                                <VStack gap="3" width="full">
+                                                    <Field.Root>
+                                                        <Field.Label color="fg">Password</Field.Label>
+                                                        <Input
+                                                            type="password"
+                                                            placeholder="Enter password"
+                                                            value={password}
+                                                            onChange={(e) => setPassword(e.target.value)}
+                                                            bg="bg"
+                                                            border="1px solid"
+                                                            borderColor="border"
+                                                            required
+                                                        />
+                                                    </Field.Root>
+                                                    <Field.Root>
+                                                        <Field.Label color="fg">Confirm Password</Field.Label>
+                                                        <Input
+                                                            type="password"
+                                                            placeholder="Confirm password"
+                                                            value={confirmPassword}
+                                                            onChange={(e) => setConfirmPassword(e.target.value)}
+                                                            bg="bg"
+                                                            border="1px solid"
+                                                            required
+                                                            {...(confirmPassword && password !== confirmPassword ? { borderColor: "red.400" } : { borderColor: "border" })}
+                                                        />
+                                                        {confirmPassword && password !== confirmPassword && (
+                                                            <Field.ErrorText>Passwords do not match</Field.ErrorText>
+                                                        )}
+                                                    </Field.Root>
+                                                </VStack>
+                                            )}
                                             <Button
                                                 type="submit"
                                                 colorPalette="accent"
                                                 width="full"
                                                 loading={creating}
-                                                disabled={!newName.trim() || !newPath.trim()}
+                                                disabled={!newName.trim() || !newPath.trim() || (encryptLibrary && (!password || password !== confirmPassword))}
                                             >
                                                 Create and Scan
                                             </Button>

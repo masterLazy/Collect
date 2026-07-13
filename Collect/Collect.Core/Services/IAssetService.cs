@@ -58,7 +58,7 @@ public interface IAssetService
     /// <summary>
     /// Upload asset files to the library.
     /// </summary>
-    Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir, bool importTagsFromFilename = false);
+    Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir, bool keepFilename = false, List<AssetTag>? tags = null);
 
     /// <summary>
     /// Get an asset's image decoded and re-encoded as a PNG byte array, resized so the
@@ -96,6 +96,21 @@ public interface IAssetService
     Task<int> CategorizeTagsAsync(BatchCategorizeRequest request);
 
     /// <summary>
+    /// Encrypt all files in the current library with the given password.
+    /// Updates library.json with encryption metadata and encrypts all asset files in-place.
+    /// Returns the number of files encrypted.
+    /// </summary>
+    Task<int> EncryptLibraryAsync(string password);
+
+    /// <summary>
+    /// Decrypt all encrypted files in the current library and remove encryption.
+    /// Requires the library to be unlocked, or a password for repair decryption.
+    /// When repairing a non-encrypted library, provide the original password.
+    /// Returns the number of files decrypted.
+    /// </summary>
+    Task<int> DecryptLibraryAsync(string? password = null);
+
+    /// <summary>
     /// Rename a category (type) across ALL assets. Changes all tags with oldType to newType.
     /// </summary>
     Task<bool> RenameCategoryAsync(string oldType, string newType);
@@ -114,6 +129,12 @@ public interface IAssetService
     /// Delete a tag value from ALL assets entirely.
     /// </summary>
     Task<bool> DeleteTagValueAsync(string value);
+
+    /// <summary>
+    /// Invalidate the in-memory asset cache so the next fetch triggers a fresh scan.
+    /// Used after unlocking an encrypted library to re-extract dimensions with the decryption key.
+    /// </summary>
+    void InvalidateCache();
 }
 
 /// <summary>

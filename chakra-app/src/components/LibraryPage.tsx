@@ -4,11 +4,14 @@ import {
     Box,
     Button,
     Center,
+    Dialog,
+    Field,
     HStack,
     IconButton,
+    Input,
+    Portal,
     Spinner,
     Drawer,
-    Portal,
     Text,
     VStack,
 } from "@chakra-ui/react"
@@ -74,6 +77,21 @@ export function LibraryPage() {
     const [libraryFullId, setLibraryFullId] = useState("")
     const [libraryPath, setLibraryPath] = useState("")
 
+    const [showUnlockDialog, setShowUnlockDialog] = useState(false)
+    const [unlockPassword, setUnlockPassword] = useState("")
+    const [unlockError, setUnlockError] = useState("")
+    const [unlocking, setUnlocking] = useState(false)
+    const [libraryEncrypted, setLibraryEncrypted] = useState(false)
+    const [decrypting, setDecrypting] = useState(false)
+    const [showDecryptDialog, setShowDecryptDialog] = useState(false)
+    const [decryptPassword, setDecryptPassword] = useState("")
+    const [decryptError, setDecryptError] = useState("")
+    const [showEncryptDialog, setShowEncryptDialog] = useState(false)
+    const [encryptPassword, setEncryptPassword] = useState("")
+    const [encryptConfirm, setEncryptConfirm] = useState("")
+    const [encryptError, setEncryptError] = useState("")
+    const [encrypting, setEncrypting] = useState(false)
+
     const initialSyncDone = useRef(false)
 
     // Load library by ID on mount with retry
@@ -96,6 +114,18 @@ export function LibraryPage() {
                     setLibraryName(info.name)
                     setLibraryFullId(info.id)
                     setLibraryPath(info.path)
+                    if (info.isEncrypted) {
+                        setLibraryEncrypted(true)
+                        // Check if already unlocked (10-min persistence)
+                        try {
+                            const status = await api.getUnlockStatus()
+                            if (!status.unlocked) {
+                                setShowUnlockDialog(true)
+                            }
+                        } catch {
+                            setShowUnlockDialog(true)
+                        }
+                    }
                     setLibraryLoading(false)
                     return
                 } catch {
@@ -309,6 +339,65 @@ export function LibraryPage() {
         }
     }, [loadAssets, searchQuery, currentFolder, toaster])
 
+    const handleDecrypt = useCallback(async () => {
+        // Always show password dialog — supports both regular decrypt and repair mode
+        setShowDecryptDialog(true)
+    }, [])
+
+    const doDecrypt = useCallback(async (password: string | undefined) => {
+        setDecrypting(true)
+        setDecryptError("")
+        try {
+            const result = await api.decryptLibrary(password)
+            setLibraryEncrypted(false)
+            setShowDecryptDialog(false)
+            toaster.create({
+                title: "Library decrypted",
+                description: result.message,
+                type: "success",
+            })
+            // Navigate back to home to reload
+            navigate("/", { state: { forceHome: true } })
+        } catch (err: any) {
+            const msg = err?.message || "Could not decrypt library."
+            if (password !== undefined) {
+                setDecryptError(msg)
+            } else {
+                toaster.create({
+                    title: "Decrypt failed",
+                    description: msg,
+                    type: "error",
+                })
+            }
+        } finally {
+            setDecrypting(false)
+        }
+    }, [navigate, toaster])
+
+    const handleEncrypt = useCallback(async () => {
+        if (!encryptPassword || encryptPassword !== encryptConfirm) return
+        setEncrypting(true)
+        setEncryptError("")
+        try {
+            const result = await api.encryptLibrary(encryptPassword)
+            setLibraryEncrypted(true)
+            setShowEncryptDialog(false)
+            setEncryptPassword("")
+            setEncryptConfirm("")
+            toaster.create({
+                title: "Library encrypted",
+                description: result.message,
+                type: "success",
+            })
+            navigate("/", { state: { forceHome: true } })
+        } catch (err: any) {
+            const msg = err?.message || "Could not encrypt library."
+            setEncryptError(msg)
+        } finally {
+            setEncrypting(false)
+        }
+    }, [encryptPassword, encryptConfirm, navigate, toaster])
+
     const handleFolderChange = useCallback((folder: string) => {
         setCurrentFolder(folder)
         setPage(1)
@@ -391,6 +480,29 @@ export function LibraryPage() {
                     })
                 }}
                 onShowAll={() => handleFolderChange("")}
+                libraryEncrypted={libraryEncrypted}
+                onDecrypt={handleDecrypt}
+                decrypting={decrypting}
+                onEncrypt={() => setShowEncryptDialog(true)}
+                encrypting={encrypting}
+                onLock={async () => {
+                    try {
+                        await api.lockLibrary();
+                        sessionStorage.removeItem("collect-unlock-token");
+                        toaster.create({
+                            title: "Library locked",
+                            description: "Session token has been invalidated.",
+                            type: "success",
+                        });
+                        // Navigate back to home so user re-enters and sees unlock dialog
+                        navigate("/", { state: { forceHome: true } });
+                    } catch {
+                        toaster.create({
+                            title: "Lock failed",
+                            type: "error",
+                        });
+                    }
+                }}
             />
 
             <Box
@@ -505,6 +617,193 @@ export function LibraryPage() {
                 onClose={() => setConflictDialogOpen(false)}
                 resolving={resolvingConflicts}
             />
+
+            {/* Unlock dialog for encrypted libraries */}
+            <Dialog.Root open={showUnlockDialog} modal={true} onOpenChange={(e: { open: boolean }) => {
+                if (!e.open) {
+                    // If closed without unlocking, go back to library manager
+                    navigate("/", { state: { forceHome: true } })
+                }
+            }}>
+                <Portal>
+                    <Dialog.Backdrop />
+                    <Dialog.Positioner>
+                        <Dialog.Content>
+                            <Dialog.Header>
+                                <Dialog.Title>Unlock Library</Dialog.Title>
+                            </Dialog.Header>
+                            <Dialog.Body>
+                                <VStack gap="4">
+                                    <Text fontSize="sm" color="fg.muted">
+                                        This library is encrypted. Enter the password to unlock it.
+                                    </Text>
+                                    <Field.Root>
+                                        <Field.Label color="fg">Password</Field.Label>
+                                        <Input
+                                            type="password"
+                                            placeholder="Enter library password"
+                                            value={unlockPassword}
+                                            onChange={(e) => { setUnlockPassword(e.target.value); setUnlockError("") }}
+                                            bg="bg"
+                                            border="1px solid"
+                                            borderColor={unlockError ? "red.400" : "border"}
+                                            autoFocus
+                                        />
+                                        {unlockError && (
+                                            <Field.ErrorText>{unlockError}</Field.ErrorText>
+                                        )}
+                                    </Field.Root>
+                                </VStack>
+                            </Dialog.Body>
+                            <Dialog.Footer>
+                                <Button variant="outline" onClick={() => navigate("/", { state: { forceHome: true } })}>
+                                    Cancel
+                                </Button>
+                                <Button
+                                    colorPalette="accent"
+                                    loading={unlocking}
+                                    disabled={!unlockPassword.trim()}
+                                    onClick={async () => {
+                                        setUnlocking(true)
+                                        setUnlockError("")
+                                        try {
+                                            await api.unlockLibrary(libraryId!, unlockPassword)
+                                            setShowUnlockDialog(false)
+                                            // Reload assets after unlock
+                                            const info = await api.getLibraryInfo()
+                                            setLibraryName(info.name)
+                                            setLibraryFullId(info.id)
+                                            setLibraryPath(info.path)
+                                            loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
+                                        } catch {
+                                            setUnlockError("Incorrect password. Please try again.")
+                                        } finally {
+                                            setUnlocking(false)
+                                        }
+                                    }}
+                                >
+                                    Unlock
+                                </Button>
+                            </Dialog.Footer>
+                        </Dialog.Content>
+                    </Dialog.Positioner>
+                </Portal>
+            </Dialog.Root>
+
+            {/* Decrypt password dialog (for repair/non-unlocked libraries) */}
+            <Dialog.Root open={showDecryptDialog} modal={true} onOpenChange={(e: { open: boolean }) => setShowDecryptDialog(e.open)}>
+                <Portal>
+                    <Dialog.Backdrop />
+                    <Dialog.Positioner>
+                        <Dialog.Content>
+                            <Dialog.Header>
+                                <Dialog.Title>Decrypt Library</Dialog.Title>
+                            </Dialog.Header>
+                            <Dialog.Body>
+                                <VStack gap="4">
+                                    <Text fontSize="sm" color="fg.muted">
+                                        Enter the encryption password to decrypt all files in this library.
+                                    </Text>
+                                    <Field.Root>
+                                        <Field.Label color="fg">Password</Field.Label>
+                                        <Input
+                                            type="password"
+                                            placeholder="Enter original encryption password"
+                                            value={decryptPassword}
+                                            onChange={(e) => { setDecryptPassword(e.target.value); setDecryptError("") }}
+                                            bg="bg"
+                                            border="1px solid"
+                                            borderColor={decryptError ? "red.400" : "border"}
+                                            autoFocus
+                                        />
+                                        {decryptError && (
+                                            <Field.ErrorText>{decryptError}</Field.ErrorText>
+                                        )}
+                                    </Field.Root>
+                                </VStack>
+                            </Dialog.Body>
+                            <Dialog.Footer>
+                                <Button variant="outline" onClick={() => setShowDecryptDialog(false)}>
+                                    Cancel
+                                </Button>
+                                <Button
+                                    colorPalette="red"
+                                    loading={decrypting}
+                                    disabled={!decryptPassword.trim()}
+                                    onClick={() => doDecrypt(decryptPassword)}
+                                >
+                                    Decrypt
+                                </Button>
+                            </Dialog.Footer>
+                        </Dialog.Content>
+                    </Dialog.Positioner>
+                </Portal>
+            </Dialog.Root>
+
+            {/* Encrypt password dialog */}
+            <Dialog.Root open={showEncryptDialog} modal={true} onOpenChange={(e: { open: boolean }) => { setShowEncryptDialog(e.open); if (!e.open) { setEncryptPassword(""); setEncryptConfirm(""); setEncryptError("") } }}>
+                <Portal>
+                    <Dialog.Backdrop />
+                    <Dialog.Positioner>
+                        <Dialog.Content>
+                            <Dialog.Header>
+                                <Dialog.Title>Encrypt Library</Dialog.Title>
+                            </Dialog.Header>
+                            <Dialog.Body>
+                                <VStack gap="4">
+                                    <Text fontSize="sm" color="fg.muted">
+                                        Set a password to encrypt all files in this library.
+                                    </Text>
+                                    <Field.Root>
+                                        <Field.Label color="fg">Password</Field.Label>
+                                        <Input
+                                            type="password"
+                                            placeholder="Enter password"
+                                            value={encryptPassword}
+                                            onChange={(e) => { setEncryptPassword(e.target.value); setEncryptError("") }}
+                                            bg="bg"
+                                            border="1px solid"
+                                            borderColor="border"
+                                            autoFocus
+                                        />
+                                    </Field.Root>
+                                    <Field.Root>
+                                        <Field.Label color="fg">Confirm Password</Field.Label>
+                                        <Input
+                                            type="password"
+                                            placeholder="Confirm password"
+                                            value={encryptConfirm}
+                                            onChange={(e) => { setEncryptConfirm(e.target.value); setEncryptError("") }}
+                                            bg="bg"
+                                            border="1px solid"
+                                            borderColor={encryptConfirm && encryptPassword !== encryptConfirm ? "red.400" : "border"}
+                                        />
+                                        {encryptConfirm && encryptPassword !== encryptConfirm && (
+                                            <Field.ErrorText>Passwords do not match</Field.ErrorText>
+                                        )}
+                                    </Field.Root>
+                                    {encryptError && (
+                                        <Text color="red.400" fontSize="sm">{encryptError}</Text>
+                                    )}
+                                </VStack>
+                            </Dialog.Body>
+                            <Dialog.Footer>
+                                <Button variant="outline" onClick={() => { setShowEncryptDialog(false); setEncryptPassword(""); setEncryptConfirm(""); setEncryptError("") }}>
+                                    Cancel
+                                </Button>
+                                <Button
+                                    colorPalette="accent"
+                                    loading={encrypting}
+                                    disabled={!encryptPassword || encryptPassword !== encryptConfirm}
+                                    onClick={handleEncrypt}
+                                >
+                                    Encrypt
+                                </Button>
+                            </Dialog.Footer>
+                        </Dialog.Content>
+                    </Dialog.Positioner>
+                </Portal>
+            </Dialog.Root>
         </Box>
     )
 }

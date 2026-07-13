@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Collect.Core.Dtos;
 using Collect.Core.Models;
@@ -21,15 +22,21 @@ public partial class AssetService : IAssetService
 
     private readonly ILibraryService _libraryService;
     private readonly IThumbnailService _thumbnailService;
+    private readonly IEncryptionService _encryptionService;
     private readonly ILogger<AssetService> _logger;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
 
     private List<Asset> _assets = new();
 
-    public AssetService(ILibraryService libraryService, IThumbnailService thumbnailService, ILogger<AssetService> logger)
+    public AssetService(
+        ILibraryService libraryService,
+        IThumbnailService thumbnailService,
+        IEncryptionService encryptionService,
+        ILogger<AssetService> logger)
     {
         _libraryService = libraryService;
         _thumbnailService = thumbnailService;
+        _encryptionService = encryptionService;
         _logger = logger;
     }
 
@@ -133,12 +140,23 @@ public partial class AssetService : IAssetService
                 else
                 {
                     // New asset
-                    var asset = CreateAssetFromFile(filePath, relativePath);
+                    var (asset, wasEncrypted) = CreateAssetFromFile(filePath, relativePath);
                     newAssets.Add(asset);
                     added++;
 
+                    // Only encrypt if the library is encrypted AND the file is not already encrypted
+                    byte[]? encryptionKey = null;
+                    if (_libraryService.IsEncryptedLibrary() && !wasEncrypted)
+                    {
+                        encryptionKey = _libraryService.GetEncryptionKey();
+                        if (encryptionKey is not null)
+                        {
+                            EncryptFileOnDisk(filePath, encryptionKey);
+                        }
+                    }
+
                     // Generate thumbnail for new asset (deduplicated by content hash)
-                    _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, filePath);
+                    _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, filePath, encryptionKey);
                 }
             }
 
@@ -172,7 +190,11 @@ public partial class AssetService : IAssetService
         }
     }
 
-    private static Asset CreateAssetFromFile(string filePath, string relativePath)
+    /// <summary>
+    /// Create an asset from a file on disk.
+    /// Returns the asset and a bool indicating whether the file was already encrypted.
+    /// </summary>
+    private (Asset Asset, bool WasEncrypted) CreateAssetFromFile(string filePath, string relativePath)
     {
         var fileInfo = new FileInfo(filePath);
         var nameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
@@ -190,6 +212,48 @@ public partial class AssetService : IAssetService
         };
 
         // Try to get image dimensions using SkiaSharp
+        var wasEncrypted = TryExtractDimensions(filePath, asset);
+
+        return (asset, wasEncrypted);
+    }
+
+    /// <summary>
+    /// Read an image file (possibly encrypted) and extract dimensions into the asset.
+    /// If the library is encrypted and unlocked, attempts to decrypt first.
+    /// Falls back to plaintext read if decryption fails (file may not yet be encrypted).
+    /// Returns true if the file was already encrypted (decryption succeeded).
+    /// </summary>
+    private bool TryExtractDimensions(string filePath, Asset asset)
+    {
+        var encryptionKey = _libraryService.GetEncryptionKey();
+        if (encryptionKey is not null)
+        {
+            // Try decrypted read first (file is encrypted from a previous session)
+            try
+            {
+                var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
+                using var decryptedStream = new MemoryStream(decrypted);
+                using var codec = SKCodec.Create(decryptedStream);
+                if (codec != null)
+                {
+                    var info = codec.Info;
+                    asset.Width = info.Width;
+                    asset.Height = info.Height;
+                }
+                return true; // file was already encrypted
+            }
+            catch (AuthenticationTagMismatchException)
+            {
+                // File is not yet encrypted (first scan of new encrypted library) —
+                // fall through to plaintext read
+            }
+            catch
+            {
+                // Other errors — fall through to plaintext read
+            }
+        }
+
+        // Plaintext read (library not encrypted, or file not yet encrypted)
         try
         {
             using var input = File.OpenRead(filePath);
@@ -205,8 +269,25 @@ public partial class AssetService : IAssetService
         {
             // Non-image or corrupt file — dimensions stay 0
         }
+        return false; // file was not encrypted
+    }
 
-        return asset;
+    /// <summary>
+    /// Encrypt a file on disk in-place using the given encryption key.
+    /// Reads the plaintext file, encrypts, and overwrites with encrypted content.
+    /// </summary>
+    private void EncryptFileOnDisk(string filePath, byte[] encryptionKey)
+    {
+        try
+        {
+            var plaintext = File.ReadAllBytes(filePath);
+            var encrypted = _encryptionService.Encrypt(plaintext, encryptionKey);
+            File.WriteAllBytes(filePath, encrypted);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to encrypt file on disk: {FilePath}", filePath);
+        }
     }
 
     /// <summary>
@@ -237,29 +318,15 @@ public partial class AssetService : IAssetService
         return $"{cleanName}{ext}";
     }
 
-    private static void UpdateAssetMetadata(Asset asset, string filePath, string relativePath)
+    private void UpdateAssetMetadata(Asset asset, string filePath, string relativePath)
     {
         var fileInfo = new FileInfo(filePath);
         asset.FileSize = fileInfo.Length;
         asset.RelativePath = relativePath;
         asset.LastModified = fileInfo.LastWriteTimeUtc;
 
-        // Try to get image dimensions using SkiaSharp
-        try
-        {
-            using var input = File.OpenRead(filePath);
-            using var codec = SKCodec.Create(input);
-            if (codec != null)
-            {
-                var info = codec.Info;
-                asset.Width = info.Width;
-                asset.Height = info.Height;
-            }
-        }
-        catch
-        {
-            // keep existing dimensions
-        }
+        // Try to get image dimensions using SkiaSharp (decrypts if needed)
+        TryExtractDimensions(filePath, asset);
     }
 
     // ──────────────────────────────────────────────
@@ -600,7 +667,7 @@ public partial class AssetService : IAssetService
         ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"
     };
 
-    public async Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir, bool keepFilename = false)
+    public async Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir, bool keepFilename = false, List<AssetTag>? tags = null)
     {
         var libraryPath = _libraryService.GetLibraryPath();
         if (libraryPath is null)
@@ -671,13 +738,69 @@ public partial class AssetService : IAssetService
 
                     // Create asset entry
                     var relativePath = Path.GetRelativePath(libraryPath, destPath);
-                    var asset = CreateAssetFromFile(destPath, relativePath);
+                    var (asset, wasEncrypted) = CreateAssetFromFile(destPath, relativePath);
+
+                    // Only encrypt if the library is encrypted AND file is not already encrypted
+                    byte[]? encryptionKey = null;
+                    if (_libraryService.IsEncryptedLibrary() && !wasEncrypted)
+                    {
+                        encryptionKey = _libraryService.GetEncryptionKey();
+                        if (encryptionKey is not null)
+                        {
+                            EncryptFileOnDisk(destPath, encryptionKey);
+                        }
+                    }
 
                     _assets.Add(asset);
                     result.Added++;
 
+                    // Apply batch tags if provided (and not keepFilename — tags replace the filename)
+                    if (tags is { Count: > 0 })
+                    {
+                        var categoryOrder = await _libraryService.GetCategoryOrderAsync();
+                        var orderedTags = ReorderTags(tags, categoryOrder);
+                        var newExt = Path.GetExtension(destPath);
+                        var newName = BuildFileNameFromTags(orderedTags, newExt);
+                        var oldDir = Path.GetDirectoryName(destPath) ?? "";
+                        var newPath = Path.Combine(oldDir, newName);
+
+                        if (!string.Equals(Path.GetFileName(destPath), newName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!File.Exists(newPath))
+                            {
+                                _thumbnailService.DeleteThumbnail(libraryPath, destPath);
+                                File.Move(destPath, newPath);
+                                destPath = newPath;
+                                var newRelativePath = Path.GetRelativePath(libraryPath, destPath);
+                                asset.FileName = newName;
+                                asset.RelativePath = newRelativePath;
+                            }
+                            else
+                            {
+                                // Collision: try numeric suffixes
+                                var baseWithoutExt = Path.GetFileNameWithoutExtension(newName);
+                                for (int i = 1; i <= 999; i++)
+                                {
+                                    var suffixedName = $"{baseWithoutExt}-{i:D2}{newExt}";
+                                    var suffixedPath = Path.Combine(oldDir, suffixedName);
+                                    if (!File.Exists(suffixedPath))
+                                    {
+                                        _thumbnailService.DeleteThumbnail(libraryPath, destPath);
+                                        File.Move(destPath, suffixedPath);
+                                        destPath = suffixedPath;
+                                        var newRelativePath = Path.GetRelativePath(libraryPath, destPath);
+                                        asset.FileName = suffixedName;
+                                        asset.RelativePath = newRelativePath;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        asset.Tags = orderedTags;
+                    }
+
                     // Generate thumbnail (deduplicated by content hash)
-                    _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, destPath);
+                    _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, destPath, encryptionKey);
                 }
                 catch (Exception ex)
                 {
@@ -848,8 +971,22 @@ public partial class AssetService : IAssetService
 
         try
         {
-            using var input = File.OpenRead(filePath);
-            using var codec = SKCodec.Create(input);
+            var encryptionKey = _libraryService.GetEncryptionKey();
+
+            // Decrypt the file if the library is encrypted
+            SKCodec codec;
+            if (encryptionKey is not null)
+            {
+                var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
+                using var decryptedStream = new MemoryStream(decrypted);
+                codec = SKCodec.Create(decryptedStream);
+            }
+            else
+            {
+                using var input = File.OpenRead(filePath);
+                codec = SKCodec.Create(input);
+            }
+
             if (codec is null) return null;
 
             var info = codec.Info;
@@ -899,7 +1036,8 @@ public partial class AssetService : IAssetService
         if (!File.Exists(sourcePath))
             return null;
 
-        return _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, sourcePath);
+        var encryptionKey = _libraryService.GetEncryptionKey();
+        return _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, sourcePath, encryptionKey);
     }
 
     // ──────────────────────────────────────────────
@@ -1093,6 +1231,18 @@ public partial class AssetService : IAssetService
         {
             await ScanAsync();
             return;
+        }
+
+        // For encrypted libraries that are now unlocked, check if dimensions are stale
+        // (e.g. scanned before unlock when the decryption key wasn't available).
+        if (_libraryService.IsEncryptedLibrary())
+        {
+            var encryptionKey = _libraryService.GetEncryptionKey();
+            if (encryptionKey is not null && _assets.Any(a => a.Width == 0 && a.Height == 0))
+            {
+                await ScanAsync();
+                return;
+            }
         }
 
         // Lightweight check: count image files on disk and compare with in-memory count.
@@ -1730,6 +1880,196 @@ public partial class AssetService : IAssetService
         }
     }
 
+    /// <summary>
+    /// Decrypt all encrypted files in the current library and remove encryption metadata.
+    /// Requires the library to be unlocked, or a password for repair decryption.
+    /// When repairing a non-encrypted library, provide the original password.
+    /// Returns the number of files decrypted.
+    /// </summary>
+    public async Task<int> EncryptLibraryAsync(string password)
+    {
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null)
+            throw new InvalidOperationException("Library not initialized.");
+
+        if (_libraryService.IsEncryptedLibrary())
+            throw new InvalidOperationException("Library is already encrypted.");
+
+        await EnsureScannedAsync();
+
+        // Generate encryption key from password
+        var (salt, verificationHash, encryptionKey) = _encryptionService.CreateKey(password);
+
+        int encrypted = 0;
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            foreach (var asset in _assets)
+            {
+                var filePath = Path.Combine(libraryPath, asset.RelativePath);
+                if (!File.Exists(filePath))
+                    continue;
+
+                EncryptFileOnDisk(filePath, encryptionKey);
+                encrypted++;
+            }
+
+            // Update library.json with encryption metadata
+            var collectDir = Path.Combine(libraryPath, ".collect");
+            var infoPath = Path.Combine(collectDir, "library.json");
+            if (File.Exists(infoPath))
+            {
+                var json = await File.ReadAllTextAsync(infoPath);
+                var info = System.Text.Json.JsonSerializer.Deserialize<LibraryInfo>(json);
+                if (info is not null)
+                {
+                    info.IsEncrypted = true;
+                    info.Salt = Convert.ToBase64String(salt);
+                    info.VerificationHash = Convert.ToBase64String(verificationHash);
+                    info.AssetCount = _assets.Count;
+                    await File.WriteAllTextAsync(infoPath, System.Text.Json.JsonSerializer.Serialize(info, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                }
+            }
+
+            // Update registry
+            await _libraryService.UpdateAssetCountAsync(_assets.Count);
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+
+        return encrypted;
+    }
+
+    public async Task<int> DecryptLibraryAsync(string? password = null)
+    {
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null)
+            throw new InvalidOperationException("Library not initialized.");
+
+        var encryptionKey = _libraryService.GetEncryptionKey();
+
+        // If no key available but we know some from this session, try each one
+        if (encryptionKey is null)
+        {
+            var knownKeys = _libraryService.GetAllKnownKeys().ToList();
+
+            // Try all known session keys first (no password needed — keys are raw)
+            foreach (var candidateKey in knownKeys)
+            {
+                // Quick test: try to decrypt the first asset file
+                var testAsset = _assets.FirstOrDefault();
+                if (testAsset is not null)
+                {
+                    var testPath = Path.Combine(libraryPath, testAsset.RelativePath);
+                    if (File.Exists(testPath))
+                    {
+                        try
+                        {
+                            var testData = _encryptionService.ReadAndDecryptFile(testPath, candidateKey);
+                            if (testData.Length > 0)
+                            {
+                                encryptionKey = candidateKey;
+                                _logger.LogInformation("Repair decrypt: found matching key from session history");
+                                break;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+
+            // If password provided, try to derive from all known salts
+            if (encryptionKey is null && !string.IsNullOrEmpty(password))
+            {
+                var libraries = await _libraryService.GetLibrariesAsync();
+                foreach (var lib in libraries)
+                {
+                    if (!lib.IsEncrypted || string.IsNullOrEmpty(lib.Salt) || string.IsNullOrEmpty(lib.VerificationHash))
+                        continue;
+
+                    var salt = Convert.FromBase64String(lib.Salt);
+                    var storedHash = Convert.FromBase64String(lib.VerificationHash);
+                    var (valid, key) = _encryptionService.VerifyPassword(password, salt, storedHash);
+                    if (valid && key is not null)
+                    {
+                        encryptionKey = key;
+                        _logger.LogInformation("Repair decrypt: found matching key from library {LibraryName}", lib.Name);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (encryptionKey is null)
+            throw new InvalidOperationException(
+                "No encryption key available. If you have never set a password on an encrypted library, " +
+                "please reopen the encrypted library first (the one that was open when files got encrypted), " +
+                "then try decrypting this library again. The session key from that library will be used.");
+
+        await EnsureScannedAsync();
+
+        int decrypted = 0;
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            foreach (var asset in _assets)
+            {
+                var filePath = Path.Combine(libraryPath, asset.RelativePath);
+                if (!File.Exists(filePath))
+                    continue;
+
+                try
+                {
+                    // Try to decrypt and overwrite with plaintext
+                    var plaintext = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
+                    File.WriteAllBytes(filePath, plaintext);
+                    decrypted++;
+                }
+                catch (AuthenticationTagMismatchException)
+                {
+                    // File is not encrypted, skip
+                }
+                catch
+                {
+                    // Other errors, skip
+                }
+            }
+
+            // Remove encryption metadata from library.json
+            var collectDir = Path.Combine(libraryPath, ".collect");
+            var infoPath = Path.Combine(collectDir, "library.json");
+            if (File.Exists(infoPath))
+            {
+                var json = await File.ReadAllTextAsync(infoPath);
+                var info = System.Text.Json.JsonSerializer.Deserialize<LibraryInfo>(json);
+                if (info is not null)
+                {
+                    info.IsEncrypted = false;
+                    info.Salt = null;
+                    info.VerificationHash = null;
+                    info.AssetCount = _assets.Count;
+                    await File.WriteAllTextAsync(infoPath, System.Text.Json.JsonSerializer.Serialize(info, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                }
+            }
+
+            // Update registry to reflect decrypted status
+            await _libraryService.UpdateAssetCountAsync(_assets.Count);
+
+            // Clear the encryption key
+            _libraryService.LockLibrary();
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+
+        return decrypted;
+    }
+
     public async Task<bool> DeleteTagValueAsync(string value)
     {
         await EnsureScannedAsync();
@@ -1806,5 +2146,14 @@ public partial class AssetService : IAssetService
             ".tiff" or ".tif" => "image/tiff",
             _ => "application/octet-stream"
         };
+    }
+
+    /// <summary>
+    /// Invalidate the in-memory asset cache so the next fetch triggers a fresh scan.
+    /// Used after unlocking an encrypted library to re-extract dimensions with the decryption key.
+    /// </summary>
+    public void InvalidateCache()
+    {
+        _assets = new List<Asset>();
     }
 }
