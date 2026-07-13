@@ -39,6 +39,8 @@ const toApiFolder = (folder: string): string | undefined => {
 const getSubfolders = (folder: string): boolean | undefined =>
     folder === "__root__" ? false : undefined
 
+export type SortMode = "newest" | "name" | "random"
+
 export function LibraryPage() {
     const { libraryId, "*": splat } = useParams()
     const navigate = useNavigate()
@@ -71,7 +73,9 @@ export function LibraryPage() {
     const [conflictDialogOpen, setConflictDialogOpen] = useState(false)
     const [resolvingConflicts, setResolvingConflicts] = useState(false)
     const [isMobile, setIsMobile] = useState(false)
+    const sortFromUrl = (new URLSearchParams(location.search).get("sort") as SortMode) || "newest"
     const [alwaysShowSearch, setAlwaysShowSearch] = useState(alwaysShowSearchFromUrl)
+    const [sortMode, setSortMode] = useState<SortMode>(sortFromUrl)
 
     const [libraryName, setLibraryName] = useState("")
     const [libraryFullId, setLibraryFullId] = useState("")
@@ -187,7 +191,7 @@ export function LibraryPage() {
     }, [])
 
     // Update URL when folder or search changes (skip the initial sync)
-    const updateUrl = useCallback((folder: string, query: string) => {
+    const updateUrl = useCallback((folder: string, query: string, sort?: string) => {
         let base: string
         if (folder === "") {
             base = `/${libraryId}` // All
@@ -198,19 +202,22 @@ export function LibraryPage() {
         }
         const params = new URLSearchParams()
         if (query) params.set("s", query)
+        const resolvedSort = sort ?? sortMode
+        if (resolvedSort !== "newest") params.set("sort", resolvedSort)
         if (alwaysShowSearch) params.set("ss", "1")
         const searchStr = params.toString()
         navigate(`${base}${searchStr ? `?${searchStr}` : ""}`, { replace: true })
-    }, [libraryId, navigate, alwaysShowSearch])
+    }, [libraryId, navigate, alwaysShowSearch, sortMode])
 
-    const loadAssets = useCallback(async (pageNum: number, query: string, append: boolean, folder?: string, subfolders?: boolean) => {
+    const loadAssets = useCallback(async (pageNum: number, query: string, append: boolean, folder?: string, subfolders?: boolean, sort?: string) => {
         setLoading(true)
         try {
+            const resolvedSort = sort ?? sortMode
             let result: Awaited<ReturnType<typeof api.getAssets>>
             if (query) {
                 result = await api.searchAssets(query, pageNum, PAGE_SIZE, folder || undefined)
             } else {
-                result = await api.getAssets(pageNum, PAGE_SIZE, folder || undefined, subfolders)
+                result = await api.getAssets(pageNum, PAGE_SIZE, folder || undefined, subfolders, resolvedSort === "newest" ? undefined : resolvedSort)
             }
             setAssets((prev) => (append ? [...prev, ...result.items] : result.items))
             setTotal(result.total)
@@ -223,8 +230,7 @@ export function LibraryPage() {
         } finally {
             setLoading(false)
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [])
+    }, [sortMode])
 
     const handleSearchChange = useCallback((query: string) => {
         setSearchQuery(query)
@@ -243,7 +249,17 @@ export function LibraryPage() {
         if (!libraryLoading) {
             loadAssets(1, query, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
         }
-    }, [currentFolder, libraryLoading, loadAssets, updateUrl])
+    }, [currentFolder, libraryLoading, loadAssets, updateUrl, sortMode])
+
+    const handleSortChange = useCallback((mode: SortMode) => {
+        setSortMode(mode)
+        setPage(1)
+        setAssets([])
+        updateUrl(currentFolder, searchQuery, mode)
+        if (!libraryLoading) {
+            loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder), mode)
+        }
+    }, [currentFolder, libraryLoading, loadAssets, updateUrl, searchQuery])
 
     const handleTagsChange = useCallback((tags: string[]) => {
         setSelectedTags(tags)
@@ -503,6 +519,8 @@ export function LibraryPage() {
                         });
                     }
                 }}
+                sortMode={sortMode}
+                onSortChange={handleSortChange}
             />
 
             <Box
@@ -792,7 +810,7 @@ export function LibraryPage() {
                                     Cancel
                                 </Button>
                                 <Button
-                                    colorPalette="accent"
+                                    colorPalette="red"
                                     loading={encrypting}
                                     disabled={!encryptPassword || encryptPassword !== encryptConfirm}
                                     onClick={handleEncrypt}

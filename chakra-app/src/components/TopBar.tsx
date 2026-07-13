@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react"
 import { SearchInput } from "./SearchInput"
 import { TagFilterModal } from "./TagFilterModal"
 
+export type SortMode = "newest" | "name" | "random"
+
 interface TopBarProps {
     searchQuery: string
     onSearchChange: (query: string) => void
@@ -28,6 +30,8 @@ interface TopBarProps {
     onEncrypt?: () => void
     encrypting?: boolean
     onLock?: () => void
+    sortMode?: SortMode
+    onSortChange?: (mode: SortMode) => void
 }
 
 function PlusIcon() {
@@ -61,6 +65,15 @@ function RefreshIcon() {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="23 4 23 10 17 10" />
             <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+        </svg>
+    )
+}
+
+function SortIcon() {
+    return (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M11 5h10M11 9h7M11 13h4" />
+            <path d="M3 5l3-3 3 3M3 19l3 3 3-3M3 9h3v10" />
         </svg>
     )
 }
@@ -139,6 +152,8 @@ export function TopBar({
     onEncrypt,
     encrypting,
     onLock,
+    sortMode = "newest",
+    onSortChange,
 }: TopBarProps) {
     // Mobile search bar visibility:
     // - If alwaysShowSearch is on: use scroll-based fade
@@ -165,6 +180,12 @@ export function TopBar({
     }, [alwaysShowSearch])
 
     const searchVisible = alwaysShowSearch ? scrollVisible : searchQuery.length > 0
+
+    const sortLabels: Record<string, string> = {
+        newest: "Latest",
+        name: "Filename",
+        random: "Random",
+    }
 
     return (
         <Box
@@ -346,6 +367,43 @@ export function TopBar({
                         <RefreshIcon />
                     </IconButton>
 
+                    {/* Desktop: Sort */}
+                    <Menu.Root>
+                        <Menu.Trigger asChild>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                aria-label="Sort assets"
+                                display={{ base: "none", md: "inline-flex" }}
+                                gap="1"
+                            >
+                                <SortIcon />
+                                <Text >{sortLabels[sortMode]}</Text>
+                            </Button>
+                        </Menu.Trigger>
+                        <Portal>
+                            <Menu.Positioner>
+                                <Menu.Content minW="140px">
+                                    {(["newest", "name", "random"] as const).map((mode) => (
+                                        <Menu.Item
+                                            key={mode}
+                                            value={mode}
+                                            onClick={() => onSortChange?.(mode)}
+                                            py="2"
+                                        >
+                                            <Box as="span" flex="1">{sortLabels[mode]}</Box>
+                                            {sortMode === mode && (
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                                    <polyline points="20 6 9 17 4 12" />
+                                                </svg>
+                                            )}
+                                        </Menu.Item>
+                                    ))}
+                                </Menu.Content>
+                            </Menu.Positioner>
+                        </Portal>
+                    </Menu.Root>
+
                     {/* Desktop: Add */}
                     <Button
                         variant="outline"
@@ -379,8 +437,8 @@ export function TopBar({
                         </Menu.Trigger>
                         <Portal>
                             <Menu.Positioner>
-                                <Menu.Content minW="160px">
-                                    {/* Mobile-only: Back to Manager */}
+                                <Menu.Content minW="170px">
+                                    {/* ── Navigation ── */}
                                     <Menu.Item value="home" onClick={onSwitchLibrary} py="2.5" display={{ md: "none" }}>
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -388,17 +446,38 @@ export function TopBar({
                                         </svg>
                                         <Box as="span" ml="2">Back to Manager</Box>
                                     </Menu.Item>
-                                    {/* Mobile-only: Folders */}
                                     <Menu.Item value="folders" onClick={onOpenMobileTree} py="2.5" display={{ md: "none" }}>
                                         <FolderIcon />
                                         <Box as="span" ml="2">Folders</Box>
                                     </Menu.Item>
-                                    {/* Mobile-only: Add Assets */}
+
+                                    {/* ── Actions ── */}
+                                    <Menu.Item value="sort" py="2.5" display={{ md: "none" }} closeOnSelect={false}>
+                                        <SortIcon />
+                                        <Box as="span" ml="2" flex="1">Sort</Box>
+                                        <Text fontSize="xs" color="fg.subtle" mr="1">{sortLabels[sortMode]}</Text>
+                                    </Menu.Item>
+                                    {(["newest", "name", "random"] as const).map((mode) => (
+                                        <Menu.Item
+                                            key={mode}
+                                            value={`sort-${mode}`}
+                                            onClick={() => onSortChange?.(mode)}
+                                            py="2"
+                                            pl="10"
+                                            display={{ md: "none" }}
+                                        >
+                                            <Box as="span" flex="1">{sortLabels[mode]}</Box>
+                                            {sortMode === mode && (
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                                    <polyline points="20 6 9 17 4 12" />
+                                                </svg>
+                                            )}
+                                        </Menu.Item>
+                                    ))}
                                     <Menu.Item value="add" onClick={onOpenAddDialog} py="2.5" display={{ md: "none" }}>
                                         <PlusIcon />
                                         <Box as="span" ml="2">Add Assets</Box>
                                     </Menu.Item>
-                                    {/* Mobile-only: Always show search */}
                                     <Menu.Item
                                         value="always-search"
                                         onClick={onToggleAlwaysShowSearch}
@@ -428,9 +507,10 @@ export function TopBar({
                                             )}
                                         </Box>
                                     </Menu.Item>
-                                    {/* Encrypt for non-encrypted libraries */}
+
+                                    {/* ── Security ── */}
                                     {!libraryEncrypted && (
-                                        <Menu.Item value="encrypt" onClick={onEncrypt} py="2.5">
+                                        <Menu.Item value="encrypt" onClick={onEncrypt} py="2.5" color="red.600">
                                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                                                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
@@ -438,25 +518,23 @@ export function TopBar({
                                             <Box as="span" ml="2">Encrypt Library</Box>
                                         </Menu.Item>
                                     )}
-                                    {/* Lock for encrypted libraries — token invalidation */}
                                     {libraryEncrypted && (
-                                        <Menu.Item value="lock" onClick={onLock} py="2.5">
-                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                                                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                                            </svg>
-                                            <Box as="span" ml="2">Lock (expire token)</Box>
-                                        </Menu.Item>
-                                    )}
-                                    {/* Decrypt for encrypted libraries */}
-                                    {libraryEncrypted && (
-                                        <Menu.Item value="decrypt" onClick={onDecrypt} py="2.5" color="red.500">
-                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                                                <path d="M7 11V7a5 5 0 0 1 9.9-1" />
-                                            </svg>
-                                            <Box as="span" ml="2">Decrypt Library</Box>
-                                        </Menu.Item>
+                                        <>
+                                            <Menu.Item value="lock" onClick={onLock} py="2.5">
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                                                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                                                </svg>
+                                                <Box as="span" ml="2">Lock (expire token)</Box>
+                                            </Menu.Item>
+                                            <Menu.Item value="decrypt" onClick={onDecrypt} py="2.5" color="red.600">
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                                                    <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+                                                </svg>
+                                                <Box as="span" ml="2">Decrypt Library</Box>
+                                            </Menu.Item>
+                                        </>
                                     )}
                                 </Menu.Content>
                             </Menu.Positioner>

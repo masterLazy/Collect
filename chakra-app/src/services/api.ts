@@ -89,10 +89,11 @@ export const api = {
         if (!res.ok) throw new Error("Upload failed")
         return res.json() as Promise<UploadResult>
     },
-    getAssets: (page: number, size: number, folder?: string, subfolders?: boolean) => {
+    getAssets: (page: number, size: number, folder?: string, subfolders?: boolean, sort?: string) => {
         let url = `/api/assets?page=${page}&size=${size}`
         if (folder) url += `&folder=${encodeURIComponent(folder)}`
         if (subfolders !== undefined) url += `&subfolders=${subfolders}`
+        if (sort) url += `&sort=${sort}`
         return get<PaginatedResponse<AssetDto>>(url)
     },
     getAsset: (id: string) => get<AssetDetailDto>(`/api/assets/${id}`),

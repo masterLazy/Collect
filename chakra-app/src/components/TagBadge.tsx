@@ -1,4 +1,5 @@
 import { Tag, Text } from "@chakra-ui/react"
+import { Tooltip } from "./ui/tooltip"
 
 // Deterministic HSL hue from any string via hash (like masonry.html)
 export function getTypeHue(type: string): number {
@@ -34,7 +35,7 @@ export function TagBadge({
     const hue = type ? getTypeHue(type) : null
     const resolvedVariant = isSelected ? "solid" : variant
 
-    return (
+    const tagEl = (
         <Tag.Root
             size={size}
             colorPalette={hue === null ? "accent" : undefined}
@@ -49,10 +50,26 @@ export function TagBadge({
             opacity={type ? 0.85 : 1}
             transition="none"
             css={hue !== null ? {
-                background: isSelected ? `hsl(${hue},30%,30%)` : `hsl(${hue},30%,87%)`,
-                color: isSelected ? "white" : undefined,
+                background: isSelected
+                    ? {
+                        base: `hsl(${hue},60%,40%)`,
+                        _dark: `hsl(${hue},40%,50%)`
+                    }
+                    : {
+                        base: `hsl(${hue},75%,92%)`,
+                        _dark: `hsl(${hue},30%,25%)`
+                    },
+                color: isSelected ? "white" : {
+                    base: "black",
+                    _dark: `hsl(${hue},70%,80%)`
+                },
                 border: "1px solid",
-                borderColor: isSelected ? `hsl(${hue},30%,87%)` : "transparent",
+                borderColor: isSelected
+                    ? {
+                        base: `hsl(${hue},70%,88%)`,
+                        _dark: `hsl(${hue},30%,25%)`
+                    }
+                    : "transparent",
             } : undefined}
         >
             <Tag.Label fontSize={size === "sm" ? "xs" : "sm"}>{value}</Tag.Label>
@@ -60,12 +77,27 @@ export function TagBadge({
                 <Text
                     as="span"
                     fontSize="xs"
-                    color={isSelected ? "white" : "fg.muted"}
+                    color={isSelected ?
+                        hue !== null ? "white" : {
+                            base: "white",
+                            _dark: "black"
+                        } : "fg.muted"}
                     ml="1"
                 >
                     ({count})
                 </Text>
-            )}
-        </Tag.Root>
+            )
+            }
+        </Tag.Root >
     )
+
+    if (type) {
+        return (
+            <Tooltip content={type} positioning={{ placement: "top", gutter: 4 }} closeOnPointerDown={false} lazyMount>
+                {tagEl}
+            </Tooltip>
+        )
+    }
+
+    return tagEl
 }

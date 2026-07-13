@@ -449,8 +449,8 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                         <Text color="fg.muted">Type</Text>
                         <Text color="fg">{asset.mimeType}</Text>
 
-                        <Text color="fg.muted">Imported</Text>
-                        <Text color="fg">{formatDate(asset.importedAt)}</Text>
+                        <Text color="fg.muted">Last Modified</Text>
+                        <Text color="fg">{formatDate(asset.lastModified ?? asset.importedAt)}</Text>
                     </Box>
 
                     {/* Path with copy icon */}
@@ -464,15 +464,18 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                             px="3"
                             py="2"
                             gap="2"
-                            cursor="pointer"
-                            onClick={handleCopyPath}
                             _hover={{ borderColor: "border.accent" }}
                             transition="border-color 0.15s"
                         >
                             <Text fontSize="xs" color="fg" flex="1" wordBreak="break-all" lineClamp={2}>
                                 {asset.relativePath}
                             </Text>
-                            <Box color={copiedPath ? "green.500" : "fg.muted"} flexShrink="0">
+                            <Box
+                                color={copiedPath ? "green.500" : "fg.muted"}
+                                flexShrink="0"
+                                cursor="pointer"
+                                onClick={handleCopyPath}
+                            >
                                 <CopyIcon />
                             </Box>
                         </HStack>

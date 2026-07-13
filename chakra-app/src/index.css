@@ -17,3 +17,8 @@ body {
     height: 100%;
     overflow: hidden;
 }
+
+/* Ensure menu items show pointer cursor on hover */
+[role="menuitem"] {
+    cursor: pointer;
+}

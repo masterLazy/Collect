@@ -196,6 +196,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
             </Box>
 
             {/* Target directory — button opens a dialog with folder tree */}
+            <Text fontSize="sm" fontWeight="semibold" color="fg">Target Directory</Text>
             <Button
                 size="sm"
                 variant="outline"
@@ -203,7 +204,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
                 justifyContent="space-between"
                 onClick={() => setFolderDialogOpen(true)}
             >
-                <Text fontSize="sm" truncate>{targetDir}</Text>
+                <Text fontSize="sm" truncate>{targetDir === "" ? "Root" : targetDir}</Text>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                     <polyline points="9 18 15 12 9 6" />
                 </svg>

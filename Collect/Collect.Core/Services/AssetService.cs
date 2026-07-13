@@ -371,10 +371,11 @@ public partial class AssetService : IAssetService
 
         var assets = sort switch
         {
-            "oldest" => filtered.OrderBy(a => a.ImportedAt).ToList(),
+            "oldest" => filtered.OrderBy(a => a.LastModified ?? a.ImportedAt).ToList(),
             "name" => filtered.OrderBy(a => a.FileName).ToList(),
             "size" => filtered.OrderByDescending(a => a.FileSize).ToList(),
-            _ => filtered.OrderByDescending(a => a.ImportedAt).ToList() // newest default
+            "random" => filtered.OrderBy(_ => Guid.NewGuid()).ToList(),
+            _ => filtered.OrderByDescending(a => a.LastModified ?? a.ImportedAt).ToList() // newest default
         };
 
         var total = assets.Count;
@@ -1270,7 +1271,8 @@ public partial class AssetService : IAssetService
             Width = asset.Width,
             Height = asset.Height,
             ThumbnailUrl = $"/api/assets/{asset.Id}/thumbnail",
-            ImportedAt = asset.ImportedAt
+            ImportedAt = asset.ImportedAt,
+            LastModified = asset.LastModified
         };
     }
 

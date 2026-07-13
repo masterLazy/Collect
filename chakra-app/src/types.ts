@@ -12,6 +12,7 @@ export interface AssetDto {
     height: number;
     thumbnailUrl: string;
     importedAt: string;
+    lastModified: string | null;
 }
 
 export interface AssetDetailDto {

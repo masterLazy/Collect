@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react"
 import { Box, Button, Field, HStack, Input, Stack, Text } from "@chakra-ui/react"
-import { Tooltip } from "./ui/tooltip"
 import { TagBadge } from "./TagBadge"
 import { api } from "../services/api"
 import type { AssetDetailDto, AssetTag } from "../types"
@@ -355,15 +354,6 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                     return 0
                 }).map((tag) => {
                     const isInFilter = selectedTags.includes(tag.value)
-                    const badge = (
-                        <TagBadge
-                            value={tag.value}
-                            type={tag.type}
-                            isSelected={isInFilter}
-                            variant="subtle"
-                            onClick={onTagClick ? () => onTagClick(tag.value) : undefined}
-                        />
-                    )
                     return (
                         <Box
                             key={(tag.type ?? "") + ":" + tag.value}
@@ -372,18 +362,13 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                             position="relative"
                             cursor="default"
                         >
-                            {tag.type ? (
-                                <Tooltip
-                                    content={tag.type}
-                                    positioning={{ placement: "top", gutter: 4 }}
-                                    closeOnPointerDown={false}
-                                    lazyMount
-                                >
-                                    {badge}
-                                </Tooltip>
-                            ) : (
-                                badge
-                            )}
+                            <TagBadge
+                                value={tag.value}
+                                type={tag.type}
+                                isSelected={isInFilter}
+                                variant="subtle"
+                                onClick={onTagClick ? () => onTagClick(tag.value) : undefined}
+                            />
                             {deleteMode && (
                                 <Box
                                     as="button"

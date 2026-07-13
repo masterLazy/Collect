@@ -13,4 +13,5 @@ public class AssetDto
     public int Height { get; set; }
     public string ThumbnailUrl { get; set; } = string.Empty;
     public DateTime ImportedAt { get; set; }
+    public DateTime? LastModified { get; set; }
 }
