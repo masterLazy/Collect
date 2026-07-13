@@ -197,12 +197,13 @@ public class AssetsController : ControllerBase
     [RequestSizeLimit(200 * 1024 * 1024)] // 200MB
     public async Task<IActionResult> Upload(
         [FromForm] List<IFormFile> files,
-        [FromForm] string targetDir)
+        [FromForm] string targetDir,
+        [FromForm] bool importTagsFromFilename = false)
     {
         if (files is null || files.Count == 0)
             return BadRequest(new { error = "No files provided." });
 
-        var result = await _assetService.UploadAssetsAsync(files, targetDir);
+        var result = await _assetService.UploadAssetsAsync(files, targetDir, importTagsFromFilename);
         return Ok(result);
     }
 
@@ -259,6 +260,20 @@ public class AssetsController : ControllerBase
     {
         var success = await _assetService.RenameTagValueAsync(request.OldValue, request.NewValue);
         return Ok(new { success });
+    }
+
+    /// <summary>
+    /// DELETE /api/assets/{id}
+    /// Delete an asset: remove from in-memory list and delete the file from disk.
+    /// </summary>
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> DeleteAsset(string id)
+    {
+        var success = await _assetService.DeleteAssetAsync(id);
+        if (!success)
+            return NotFound(new { error = $"Asset '{id}' not found." });
+
+        return Ok(new { success = true });
     }
 
     /// <summary>

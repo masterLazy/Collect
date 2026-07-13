@@ -1,6 +1,6 @@
 import type { AssetDetailDto, AssetDto, AssetTag, DirectoryTreeResponse, LibraryInfo, PaginatedResponse, ScanResult, ServerBrowseResponse, ServerDrive, TagConflict, TagGroupsResponse, UploadResult } from "../types";
 
-const API_BASE = "http://localhost:5000";
+const API_BASE = `http://${window.location.hostname}:5000`;
 
 async function get<T>(url: string): Promise<T> {
     const response = await fetch(`${API_BASE}${url}`);
@@ -48,11 +48,12 @@ export const api = {
         post<{ path: string }>("/api/library/rename-directory", { relativePath, newName }),
     deleteDirectory: (relativePath: string) =>
         post<{ success: boolean }>("/api/library/delete-directory", { relativePath }),
-    uploadAssets: async (files: File[], targetDir: string) => {
+    uploadAssets: async (files: File[], targetDir: string, importTagsFromFilename?: boolean) => {
         const formData = new FormData()
         files.forEach((f) => formData.append("files", f))
         formData.append("targetDir", targetDir)
-        const res = await fetch("http://localhost:5000/api/assets/upload", {
+        formData.append("importTagsFromFilename", String(importTagsFromFilename ?? false))
+        const res = await fetch(API_BASE + "/api/assets/upload", {
             method: "POST",
             body: formData,
         })
@@ -105,4 +106,6 @@ export const api = {
         post<{ success: boolean }>("/api/assets/rename-tag", { oldValue, newValue }),
     deleteTag: (value: string) =>
         post<{ success: boolean }>("/api/assets/delete-tag", { value }),
+    saveCategoryOrder: (order: string[]) =>
+        post<{ success: boolean }>("/api/library/category-order", { order }),
 };

@@ -6,6 +6,8 @@ import type { DirectoryNode as DirectoryNodeType } from "../types"
 interface DirectoryTreeProps {
     currentFolder: string
     onFolderChange: (folder: string) => void
+    onMoveAsset?: (assetId: string, targetFolder: string) => void
+    refreshKey?: number
 }
 
 function FolderIcon() {
@@ -71,12 +73,14 @@ function FolderNode({
     currentFolder,
     onFolderChange,
     loadTree,
+    onMoveAsset,
 }: {
     node: DirectoryNodeType
     depth: number
     currentFolder: string
     onFolderChange: (folder: string) => void
     loadTree: () => void
+    onMoveAsset?: (assetId: string, targetFolder: string) => void
 }) {
     // Top-level folders expanded by default, deeper ones collapsed
     const [expanded, setExpanded] = useState(depth === 0)
@@ -89,10 +93,33 @@ function FolderNode({
     const [subdirDialogOpen, setSubdirDialogOpen] = useState(false)
     const [subdirName, setSubdirName] = useState("")
     const [creatingSubdir, setCreatingSubdir] = useState(false)
+    const [dragOver, setDragOver] = useState(false)
     const hasChildren = node.children && node.children.length > 0
     const isSelected = currentFolder === node.path
     const isUncategorized = node.name === "Uncategorized"
     const showMenu = !isUncategorized
+
+    const handleDragOver = (e: React.DragEvent) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setDragOver(true)
+        e.dataTransfer.dropEffect = "move"
+    }
+
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.stopPropagation()
+        setDragOver(false)
+    }
+
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setDragOver(false)
+        const assetId = e.dataTransfer.getData("text/plain")
+        if (assetId && onMoveAsset) {
+            onMoveAsset(assetId, node.path)
+        }
+    }
 
     const handleClick = () => {
         onFolderChange(node.path)
@@ -170,17 +197,24 @@ function FolderNode({
                 pr="3"
                 cursor="pointer"
                 position="relative"
-                bg={isSelected
-                    ? { base: "blue.50", _dark: "blue.950" }
-                    : isUncategorized
-                        ? { base: "blue.50/40", _dark: "blue.950/30" }
+                bg={dragOver
+                    ? { base: "blue.100", _dark: "blue.800" }
+                    : isSelected
+                        ? { base: "blue.50", _dark: "blue.950" }
                         : "transparent"}
                 borderLeft="2px solid"
-                borderLeftColor={isSelected ? "accent.default" : "transparent"}
-                _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
+                borderLeftColor={dragOver
+                    ? { base: "blue.300", _dark: "blue.600" }
+                    : isSelected
+                        ? "accent.default"
+                        : "transparent"}
+                _hover={{ bg: dragOver ? { base: "blue.100", _dark: "blue.800" } : { base: "blue.50", _dark: "blue.950" } }}
                 onClick={handleClick}
                 onMouseEnter={() => setIsHovered(true)}
                 onMouseLeave={() => setIsHovered(false)}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
                 transition="background 0.1s"
                 role="treeitem"
                 aria-selected={isSelected}
@@ -412,6 +446,7 @@ function FolderNode({
                             currentFolder={currentFolder}
                             onFolderChange={onFolderChange}
                             loadTree={loadTree}
+                            onMoveAsset={onMoveAsset}
                         />
                     ))}
                 </Box>
@@ -420,12 +455,13 @@ function FolderNode({
     )
 }
 
-export function DirectoryTree({ currentFolder, onFolderChange }: DirectoryTreeProps) {
+export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refreshKey }: DirectoryTreeProps) {
     const [tree, setTree] = useState<DirectoryNodeType | null>(null)
     const [loading, setLoading] = useState(true)
     const [createDirOpen, setCreateDirOpen] = useState(false)
     const [newDirName, setNewDirName] = useState("")
     const [creating, setCreating] = useState(false)
+    const [rootDragOver, setRootDragOver] = useState(false)
     const treeVersionRef = useRef(0)
 
     const loadTree = useCallback(() => {
@@ -443,13 +479,19 @@ export function DirectoryTree({ currentFolder, onFolderChange }: DirectoryTreePr
 
     useEffect(() => {
         loadTree()
-    }, [loadTree])
+    }, [loadTree, refreshKey])
 
     const handleCreateDirectory = async () => {
         if (!newDirName.trim()) return
         setCreating(true)
         try {
-            await api.createDirectory(newDirName.trim())
+            // Create folder relative to the currently selected folder
+            // __root__ means we're at the library root, same as empty string
+            const parentFolder = currentFolder === "__root__" ? "" : currentFolder
+            const relativePath = parentFolder
+                ? `${parentFolder}/${newDirName.trim()}`
+                : newDirName.trim()
+            await api.createDirectory(relativePath)
             setCreateDirOpen(false)
             setNewDirName("")
             loadTree()
@@ -513,6 +555,7 @@ export function DirectoryTree({ currentFolder, onFolderChange }: DirectoryTreePr
                             currentFolder={currentFolder}
                             onFolderChange={onFolderChange}
                             loadTree={loadTree}
+                            onMoveAsset={onMoveAsset}
                         />
                     ))}
 
@@ -522,11 +565,14 @@ export function DirectoryTree({ currentFolder, onFolderChange }: DirectoryTreePr
                         py="1.5"
                         px="3"
                         cursor="pointer"
-                        bg={currentFolder === "__root__" ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
+                        bg={rootDragOver ? { base: "blue.100", _dark: "blue.800" } : currentFolder === "__root__" ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
                         borderLeft="2px solid"
-                        borderLeftColor={currentFolder === "__root__" ? "accent.default" : "transparent"}
-                        _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
+                        borderLeftColor={rootDragOver ? { base: "blue.300", _dark: "blue.600" } : currentFolder === "__root__" ? "accent.default" : "transparent"}
+                        _hover={{ bg: rootDragOver ? { base: "blue.100", _dark: "blue.800" } : { base: "blue.50", _dark: "blue.950" } }}
                         onClick={() => onFolderChange("__root__")}
+                        onDragOver={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(true); e.dataTransfer.dropEffect = "move"; }}
+                        onDragLeave={(e: React.DragEvent) => { e.stopPropagation(); setRootDragOver(false); }}
+                        onDrop={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(false); const assetId = e.dataTransfer.getData("text/plain"); if (assetId && onMoveAsset) { onMoveAsset(assetId, ""); } }}
                         transition="background 0.1s"
                         role="treeitem"
                         aria-selected={currentFolder === "__root__"}
@@ -549,6 +595,7 @@ export function DirectoryTree({ currentFolder, onFolderChange }: DirectoryTreePr
                             currentFolder={currentFolder}
                             onFolderChange={onFolderChange}
                             loadTree={loadTree}
+                            onMoveAsset={onMoveAsset}
                         />
                     ))}
                 </>
@@ -574,20 +621,20 @@ export function DirectoryTree({ currentFolder, onFolderChange }: DirectoryTreePr
                         <Dialog.Content>
                             <Dialog.Header>
                                 <Dialog.Title>Create New Directory</Dialog.Title>
+                                <Text fontSize="sm" color="fg.subtle" mt="1">
+                                    {currentFolder === "__root__" ? "in \\" : currentFolder ? `in ${currentFolder}\\` : "in library root"}
+                                </Text>
                             </Dialog.Header>
                             <Dialog.Body>
                                 <Field.Root>
-                                    <Field.Label>Directory path (relative to library root)</Field.Label>
+                                    <Field.Label>Folder name</Field.Label>
                                     <Input
                                         value={newDirName}
                                         onChange={(e) => setNewDirName(e.target.value)}
-                                        placeholder="e.g. ai/landscape"
+                                        placeholder="e.g. landscapes"
                                         size="sm"
                                         onKeyDown={(e: React.KeyboardEvent) => { if (e.key === "Enter") handleCreateDirectory() }}
                                     />
-                                    <Text fontSize="xs" color="fg.subtle" mt="1">
-                                        Nested directories will be created automatically.
-                                    </Text>
                                 </Field.Root>
                             </Dialog.Body>
                             <Dialog.Footer>

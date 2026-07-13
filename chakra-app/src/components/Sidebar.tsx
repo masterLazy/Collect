@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useNavigate, useParams } from "react-router-dom"
 import type { CustomToaster } from "./CustomToast"
 import {
     Badge,
@@ -18,7 +19,7 @@ import { api } from "../services/api"
 import { TagEditor } from "./TagEditor"
 import type { AssetDetailDto, AssetTag, DirectoryNode } from "../types"
 
-const API_BASE = "http://localhost:5000"
+const API_BASE = `http://${window.location.hostname}:5000`
 
 interface SidebarProps {
     assetId: string | null
@@ -43,6 +44,17 @@ function CopyIcon() {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+    )
+}
+
+function ExpandIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="15 3 21 3 21 9" />
+            <polyline points="9 21 3 21 3 15" />
+            <line x1="21" y1="3" x2="14" y2="10" />
+            <line x1="3" y1="21" x2="10" y2="14" />
         </svg>
     )
 }
@@ -116,6 +128,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [moveDialogOpen, setMoveDialogOpen] = useState(false)
     const [moveDirTree, setMoveDirTree] = useState<DirectoryNode | null>(null)
     const [selectedMoveTarget, setSelectedMoveTarget] = useState<string>("")
+    const [moveTargetSelected, setMoveTargetSelected] = useState(false)
     const [moving, setMoving] = useState(false)
 
     useEffect(() => {
@@ -165,6 +178,14 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [copiedImage, setCopiedImage] = useState(false)
     const [imageHovered, setImageHovered] = useState(false)
     const imageBoxRef = useRef<HTMLDivElement>(null)
+    const { libraryId } = useParams()
+    const navigate = useNavigate()
+
+    const handleOpenFullscreen = () => {
+        if (!assetId || !libraryId) return
+        const shortId = libraryId.length > 8 ? libraryId.slice(0, 8) : libraryId
+        navigate(`/${shortId}/view/${assetId}`)
+    }
 
     const checkOverflow = useCallback(() => {
         const el = imageBoxRef.current
@@ -215,6 +236,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         try {
             await api.deleteAsset(asset.id)
             toaster.create({ title: "Asset deleted", type: "success" })
+            onRefreshRequested?.()
             onClose()
         } catch {
             toaster.create({ title: "Delete failed", type: "error" })
@@ -223,6 +245,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
 
     const handleOpenMoveDialog = async () => {
         setSelectedMoveTarget("")
+        setMoveTargetSelected(true) // Root pre-selected
         try {
             const tree = await api.getDirectoryTree()
             setMoveDirTree(tree.root)
@@ -233,13 +256,14 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     }
 
     const handleMoveAsset = async () => {
-        if (!asset || !selectedMoveTarget) return
+        if (!asset || !moveTargetSelected) return
         setMoving(true)
         try {
-            const updated = await api.moveAsset(asset.id, selectedMoveTarget)
+            const target = selectedMoveTarget // "" = root in backend
+            const updated = await api.moveAsset(asset.id, target)
             setAsset(updated)
             setTags(updated.tags)
-            toaster.create({ title: "Moved to " + selectedMoveTarget, type: "success" })
+            toaster.create({ title: "Moved to " + (target || "root"), type: "success" })
             setMoveDialogOpen(false)
             onRefreshRequested?.()
         } catch {
@@ -263,7 +287,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                     borderRadius="sm"
                     bg={isSelected ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
                     _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
-                    onClick={() => setSelectedMoveTarget(node.path)}
+                    onClick={() => { setSelectedMoveTarget(node.path); setMoveTargetSelected(true) }}
                     transition="background 0.1s"
                 >
                     <Text fontSize="sm" color="fg" truncate flex="1">{node.name}</Text>
@@ -280,13 +304,6 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
 
     return (
         <Stack gap="4">
-            {/* Close button — only shown on mobile (desktop has sticky bar in SidebarPanel) */}
-            <HStack display={{ base: "flex", md: "none" }} gap="0">
-                <IconButton variant="ghost" size="sm" onClick={onClose} aria-label="Close sidebar">
-                    <XIcon />
-                </IconButton>
-            </HStack>
-
             {/* Preview image — collapse tall images */}
             <Box
                 borderRadius="md"
@@ -315,7 +332,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                         </Box>
                     ) : (
                         <Image
-                            src={API_BASE + "/api/assets/" + assetId + "/image"}
+                            src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset?.lastModified ?? "")}
                             alt=""
                             width="full"
                             height="full"
@@ -327,33 +344,54 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                             onError={() => { setImageLoaded(true); setError(true) }}
                         />
                     )}
-                    {/* Copy image button — top-right, visible on hover */}
+                    {/* Image action buttons — top-right, visible on hover */}
                     {asset && imageLoaded && !error && (
-                        <IconButton
-                            position="absolute"
-                            top="2"
-                            right="2"
-                            size="xs"
-                            variant="ghost"
-                            bg="black/40"
-                            color="white"
-                            _hover={{ bg: "black/60" }}
-                            opacity={imageHovered ? 1 : 0}
-                            transition="opacity 0.15s"
-                            aria-label="Copy image"
-                            onClick={(e) => {
-                                e.stopPropagation()
-                                handleCopyImage()
-                            }}
-                        >
-                            {copiedImage ? (
-                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                    <polyline points="20 6 9 17 4 12" />
-                                </svg>
-                            ) : (
-                                <CopyIcon />
-                            )}
-                        </IconButton>
+                        <>
+                            <IconButton
+                                position="absolute"
+                                top="2"
+                                right="12"
+                                size="xs"
+                                variant="ghost"
+                                bg="black/40"
+                                color="white"
+                                _hover={{ bg: "black/60" }}
+                                opacity={imageHovered ? 1 : 0}
+                                transition="opacity 0.15s"
+                                aria-label="Copy image"
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    handleCopyImage()
+                                }}
+                            >
+                                {copiedImage ? (
+                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                        <polyline points="20 6 9 17 4 12" />
+                                    </svg>
+                                ) : (
+                                    <CopyIcon />
+                                )}
+                            </IconButton>
+                            <IconButton
+                                position="absolute"
+                                top="2"
+                                right="2"
+                                size="xs"
+                                variant="ghost"
+                                bg="black/40"
+                                color="white"
+                                _hover={{ bg: "black/60" }}
+                                opacity={imageHovered ? 1 : 0}
+                                transition="opacity 0.15s"
+                                aria-label="View fullscreen"
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    handleOpenFullscreen()
+                                }}
+                            >
+                                <ExpandIcon />
+                            </IconButton>
+                        </>
                     )}
                 </Box>
                 {imageOverflows && !imageExpanded && (
@@ -510,6 +548,20 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                                     <Dialog.Body>
                                         {moveDirTree ? (
                                             <Box maxH="300px" overflow="auto">
+                                                {/* Root option */}
+                                                <HStack
+                                                    gap="1"
+                                                    py="1.5"
+                                                    px="2"
+                                                    cursor="pointer"
+                                                    borderRadius="sm"
+                                                    bg={selectedMoveTarget === "" ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
+                                                    _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
+                                                    onClick={() => { setSelectedMoveTarget(""); setMoveTargetSelected(true) }}
+                                                    transition="background 0.1s"
+                                                >
+                                                    <Text fontSize="sm" color="fg" truncate flex="1">Root</Text>
+                                                </HStack>
                                                 {moveDirTree.children?.map((child) => (
                                                     <FolderOption key={child.path} node={child} depth={0} />
                                                 ))}
@@ -531,7 +583,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                                         <Button
                                             colorPalette="accent"
                                             loading={moving}
-                                            disabled={!selectedMoveTarget}
+                                            disabled={!moveTargetSelected}
                                             onClick={handleMoveAsset}
                                         >
                                             Move

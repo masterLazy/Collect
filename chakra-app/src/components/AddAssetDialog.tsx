@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react"
 import {
     Box,
     Button,
+    Checkbox,
     Dialog,
+    Drawer,
     Field,
     HStack,
     Input,
@@ -20,6 +22,7 @@ interface AddAssetDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     toaster: CustomToaster
+    isMobile?: boolean
     onAssetsAdded: () => void
 }
 
@@ -74,27 +77,54 @@ function formatSize(bytes: number): string {
     return bytes + " B"
 }
 
-function flattenTree(node: DirectoryNode, prefix: string = ""): { label: string; path: string }[] {
-    const items: { label: string; path: string }[] = []
-    if (prefix) {
-        items.push({ label: prefix + node.name, path: node.path })
-    }
-    if (node.children) {
-        for (const child of node.children) {
-            items.push(...flattenTree(child, prefix ? prefix + node.name + "/" : ""))
-        }
-    }
-    return items
+function FolderOption({
+    node,
+    depth,
+    selectedPath,
+    onSelect,
+}: {
+    node: DirectoryNode
+    depth: number
+    selectedPath: string
+    onSelect: (path: string) => void
+}) {
+    const isSelected = selectedPath === node.path
+    return (
+        <>
+            <HStack
+                gap="1"
+                py="1.5"
+                px="2"
+                pl={2 + depth * 3}
+                cursor="pointer"
+                borderRadius="sm"
+                bg={isSelected ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
+                _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
+                onClick={() => onSelect(node.path)}
+                transition="background 0.1s"
+            >
+                <Text fontSize="sm" color="fg" truncate flex="1">{node.name}</Text>
+                {node.assetCount > 0 && (
+                    <Text fontSize="xs" color="fg.subtle">{node.assetCount}</Text>
+                )}
+            </HStack>
+            {node.children?.map((child) => (
+                <FolderOption key={child.path} node={child} depth={depth + 1} selectedPath={selectedPath} onSelect={onSelect} />
+            ))}
+        </>
+    )
 }
 
-export function AddAssetDialog({ open, onOpenChange, toaster, onAssetsAdded }: AddAssetDialogProps) {
+export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssetsAdded }: AddAssetDialogProps) {
     const [files, setFiles] = useState<FileEntry[]>([])
     const [targetDir, setTargetDir] = useState("Uncategorized")
     const [uploading, setUploading] = useState(false)
     const [dragOver, setDragOver] = useState(false)
     const [tree, setTree] = useState<DirectoryNode | null>(null)
+    const [folderDialogOpen, setFolderDialogOpen] = useState(false)
     const [creatingSubfolder, setCreatingSubfolder] = useState(false)
     const [newFolderName, setNewFolderName] = useState("")
+    const [importTags, setImportTags] = useState(false)
     const fileInputRef = useRef<HTMLInputElement>(null)
 
     useEffect(() => {
@@ -104,10 +134,12 @@ export function AddAssetDialog({ open, onOpenChange, toaster, onAssetsAdded }: A
             setTargetDir("Uncategorized")
             setUploading(false)
             setDragOver(false)
+            setFolderDialogOpen(false)
+            setCreatingSubfolder(false)
+            setNewFolderName("")
+            setImportTags(false)
         }
     }, [open])
-
-    const dirOptions = tree ? flattenTree(tree) : []
 
     const addFiles = (fileList: FileList) => {
         const newEntries: FileEntry[] = Array.from(fileList).map((f) => {
@@ -176,7 +208,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, onAssetsAdded }: A
 
         setUploading(true)
         try {
-            const result: UploadResult = await api.uploadAssets(readyFiles, targetDir)
+            const result: UploadResult = await api.uploadAssets(readyFiles, targetDir, importTags)
             toaster.create({
                 title: "Upload complete",
                 description: result.added + " file(s) added" + (result.errors.length > 0 ? ", " + result.errors.length + " error(s)" : ""),
@@ -195,6 +227,227 @@ export function AddAssetDialog({ open, onOpenChange, toaster, onAssetsAdded }: A
         }
     }
 
+    const content = (
+        <Stack gap="4">
+            {/* Drop zone */}
+            <Box
+                border="2px dashed"
+                borderColor={dragOver ? "accent.default" : "border"}
+                borderRadius="md"
+                p="8"
+                textAlign="center"
+                cursor="pointer"
+                bg={dragOver ? "bg.subtle" : "bg"}
+                transition="all 0.15s"
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onClick={handleFilePick}
+            >
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept="image/*"
+                    style={{ display: "none" }}
+                    onChange={handleFileInputChange}
+                />
+                <VStack gap="2">
+                    <Box color="fg.muted">
+                        <UploadIcon />
+                    </Box>
+                    <Text color="fg" fontWeight="medium">
+                        Drag & drop files here, or click to select
+                    </Text>
+                    <Text color="fg.subtle" fontSize="sm">
+                        Supports JPEG, PNG, WebP, GIF, BMP, TIFF, SVG, AVIF
+                    </Text>
+                </VStack>
+            </Box>
+
+            {/* Target directory — button opens a dialog with folder tree */}
+            <Field.Root>
+                <Field.Label color="fg">Target Directory</Field.Label>
+                <HStack gap="2">
+                    <Button
+                        size="sm"
+                        variant="outline"
+                        width="full"
+                        justifyContent="space-between"
+                        onClick={() => setFolderDialogOpen(true)}
+                    >
+                        <Text fontSize="sm" truncate>{targetDir}</Text>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                            <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                    </Button>
+                    <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setCreatingSubfolder(!creatingSubfolder)}
+                        aria-label="Create subfolder"
+                    >
+                        <FolderPlusIcon />
+                    </Button>
+                </HStack>
+            </Field.Root>
+
+            {/* Folder picker dialog */}
+            <Dialog.Root open={folderDialogOpen} onOpenChange={(e: { open: boolean }) => setFolderDialogOpen(e.open)}>
+                <Portal>
+                    <Dialog.Backdrop />
+                    <Dialog.Positioner>
+                        <Dialog.Content>
+                            <Dialog.Header>
+                                <Dialog.Title>Select Target Directory</Dialog.Title>
+                            </Dialog.Header>
+                            <Dialog.Body>
+                                {tree ? (
+                                    <Box maxH="300px" overflow="auto">
+                                        <FolderOption
+                                            node={{ name: "Uncategorized", path: "Uncategorized", assetCount: 0, children: [] }}
+                                            depth={0}
+                                            selectedPath={targetDir}
+                                            onSelect={(path) => { setTargetDir(path); setFolderDialogOpen(false) }}
+                                        />
+                                        <FolderOption
+                                            node={tree}
+                                            depth={0}
+                                            selectedPath={targetDir}
+                                            onSelect={(path) => { setTargetDir(path); setFolderDialogOpen(false) }}
+                                        />
+                                    </Box>
+                                ) : (
+                                    <Text fontSize="sm" color="fg.subtle">Loading folders...</Text>
+                                )}
+                                <Text fontSize="xs" color="fg.subtle" mt="2">
+                                    Current: {targetDir}
+                                </Text>
+                            </Dialog.Body>
+                            <Dialog.Footer>
+                                <Button variant="outline" onClick={() => setFolderDialogOpen(false)}>
+                                    Cancel
+                                </Button>
+                                <Button colorPalette="accent" onClick={() => setFolderDialogOpen(false)}>
+                                    Select
+                                </Button>
+                            </Dialog.Footer>
+                        </Dialog.Content>
+                    </Dialog.Positioner>
+                </Portal>
+            </Dialog.Root>
+
+            {creatingSubfolder && (
+                <HStack gap="2">
+                    <Input
+                        placeholder="New folder name"
+                        value={newFolderName}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewFolderName(e.target.value)}
+                        size="sm"
+                        bg="bg"
+                        border="1px solid"
+                        borderColor="border"
+                    />
+                    <Button size="sm" colorPalette="accent" onClick={handleCreateSubfolder}>
+                        Create
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => { setCreatingSubfolder(false); setNewFolderName("") }}>
+                        Cancel
+                    </Button>
+                </HStack>
+            )}
+
+            {/* Import tags from filename checkbox */}
+            <Checkbox.Root
+                checked={importTags}
+                onCheckedChange={(e: { checked: boolean }) => setImportTags(!!e.checked)}
+            >
+                <Checkbox.HiddenInput />
+                <Checkbox.Control />
+                <Checkbox.Label color="fg" fontSize="sm">
+                    Import tags from filename
+                </Checkbox.Label>
+            </Checkbox.Root>
+
+            {/* File list preview */}
+            {files.length > 0 && (
+                <Stack gap="2">
+                    <Text fontWeight="semibold" fontSize="sm" color="fg">
+                        Selected Files ({files.length})
+                    </Text>
+                    <Box maxH="200px" overflowY="auto" border="1px solid" borderColor="border" borderRadius="md" p="2">
+                        {files.map((entry, i) => (
+                            <HStack key={i} gap="2" py="1" px="1" _hover={{ bg: "bg.subtle" }} borderRadius="sm">
+                                <Text fontSize="sm" color="fg" truncate flex="1">
+                                    {entry.file.name}
+                                </Text>
+                                <Text fontSize="xs" color="fg.subtle" flexShrink="0">
+                                    {formatSize(entry.file.size)}
+                                </Text>
+                                {entry.status === "error" ? (
+                                    <Tag.Root size="sm" colorPalette="red" variant="subtle">
+                                        <Tag.Label>{entry.errorReason}</Tag.Label>
+                                    </Tag.Root>
+                                ) : (
+                                    <Tag.Root size="sm" colorPalette="green" variant="subtle">
+                                        <Tag.Label>Ready</Tag.Label>
+                                    </Tag.Root>
+                                )}
+                                <Button
+                                    size="xs"
+                                    variant="ghost"
+                                    onClick={() => removeFile(i)}
+                                    aria-label={"Remove " + entry.file.name}
+                                >
+                                    <XIcon />
+                                </Button>
+                            </HStack>
+                        ))}
+                    </Box>
+                </Stack>
+            )}
+        </Stack>
+    )
+
+    if (isMobile) {
+        return (
+            <Drawer.Root placement="bottom" open={open} onOpenChange={(e: { open: boolean }) => onOpenChange(e.open)}>
+                <Portal>
+                    <Drawer.Backdrop />
+                    <Drawer.Positioner>
+                        <Drawer.Content maxH="85vh" borderTopRadius="lg">
+                            <Drawer.Header>
+                                <HStack justify="space-between" width="full">
+                                    <Drawer.Title>Add Assets</Drawer.Title>
+                                    <Drawer.CloseTrigger asChild>
+                                        <Button variant="ghost" size="sm" aria-label="Close">
+                                            <XIcon />
+                                        </Button>
+                                    </Drawer.CloseTrigger>
+                                </HStack>
+                            </Drawer.Header>
+                            <Drawer.Body>{content}</Drawer.Body>
+                            <Drawer.Footer>
+                                <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+                                    Cancel
+                                </Button>
+                                <Button
+                                    colorPalette="accent"
+                                    size="sm"
+                                    loading={uploading}
+                                    disabled={files.filter((f) => f.status === "ready").length === 0}
+                                    onClick={handleSubmit}
+                                >
+                                    Upload
+                                </Button>
+                            </Drawer.Footer>
+                        </Drawer.Content>
+                    </Drawer.Positioner>
+                </Portal>
+            </Drawer.Root>
+        )
+    }
+
     return (
         <Dialog.Root open={open} onOpenChange={(e: { open: boolean }) => onOpenChange(e.open)} size="lg">
             <Portal>
@@ -211,145 +464,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, onAssetsAdded }: A
                                 </Dialog.CloseTrigger>
                             </HStack>
                         </Dialog.Header>
-                        <Dialog.Body>
-                            <Stack gap="4">
-                                {/* Drop zone */}
-                                <Box
-                                    border="2px dashed"
-                                    borderColor={dragOver ? "accent.default" : "border"}
-                                    borderRadius="md"
-                                    p="8"
-                                    textAlign="center"
-                                    cursor="pointer"
-                                    bg={dragOver ? "bg.subtle" : "bg"}
-                                    transition="all 0.15s"
-                                    onDrop={handleDrop}
-                                    onDragOver={handleDragOver}
-                                    onDragLeave={handleDragLeave}
-                                    onClick={handleFilePick}
-                                >
-                                    <input
-                                        ref={fileInputRef}
-                                        type="file"
-                                        multiple
-                                        accept="image/*"
-                                        style={{ display: "none" }}
-                                        onChange={handleFileInputChange}
-                                    />
-                                    <VStack gap="2">
-                                        <Box color="fg.muted">
-                                            <UploadIcon />
-                                        </Box>
-                                        <Text color="fg" fontWeight="medium">
-                                            Drag & drop files here, or click to select
-                                        </Text>
-                                        <Text color="fg.subtle" fontSize="sm">
-                                            Supports JPEG, PNG, WebP, GIF, BMP, TIFF, SVG, AVIF
-                                        </Text>
-                                    </VStack>
-                                </Box>
-
-                                {/* Target directory */}
-                                <Field.Root>
-                                    <Field.Label color="fg">Target Directory</Field.Label>
-                                    <HStack gap="2">
-                                        <select
-                                            value={targetDir}
-                                            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setTargetDir(e.target.value)}
-                                            style={{
-                                                width: "100%",
-                                                background: "var(--chakra-colors-bg)",
-                                                border: "1px solid var(--chakra-colors-border)",
-                                                borderRadius: "var(--chakra-radii-md)",
-                                                padding: "8px 12px",
-                                                fontSize: "var(--chakra-fontSizes-sm)",
-                                                color: "var(--chakra-colors-fg)",
-                                                appearance: "none",
-                                                WebkitAppearance: "none",
-                                                MozAppearance: "none",
-                                                cursor: "pointer",
-                                            }}
-                                        >
-                                            {dirOptions.length > 0 ? (
-                                                dirOptions.map((opt) => (
-                                                    <option key={opt.path} value={opt.path}>
-                                                        {opt.label}
-                                                    </option>
-                                                ))
-                                            ) : (
-                                                <option value="Uncategorized">Uncategorized</option>
-                                            )}
-                                        </select>
-                                        <Button
-                                            size="sm"
-                                            variant="ghost"
-                                            onClick={() => setCreatingSubfolder(!creatingSubfolder)}
-                                            aria-label="Create subfolder"
-                                        >
-                                            <FolderPlusIcon />
-                                        </Button>
-                                    </HStack>
-                                </Field.Root>
-
-                                {creatingSubfolder && (
-                                    <HStack gap="2">
-                                        <Input
-                                            placeholder="New folder name"
-                                            value={newFolderName}
-                                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewFolderName(e.target.value)}
-                                            size="sm"
-                                            bg="bg"
-                                            border="1px solid"
-                                            borderColor="border"
-                                        />
-                                        <Button size="sm" colorPalette="accent" onClick={handleCreateSubfolder}>
-                                            Create
-                                        </Button>
-                                        <Button size="sm" variant="ghost" onClick={() => { setCreatingSubfolder(false); setNewFolderName("") }}>
-                                            Cancel
-                                        </Button>
-                                    </HStack>
-                                )}
-
-                                {/* File list preview */}
-                                {files.length > 0 && (
-                                    <Stack gap="2">
-                                        <Text fontWeight="semibold" fontSize="sm" color="fg">
-                                            Selected Files ({files.length})
-                                        </Text>
-                                        <Box maxH="200px" overflowY="auto" border="1px solid" borderColor="border" borderRadius="md" p="2">
-                                            {files.map((entry, i) => (
-                                                <HStack key={i} gap="2" py="1" px="1" _hover={{ bg: "bg.subtle" }} borderRadius="sm">
-                                                    <Text fontSize="sm" color="fg" truncate flex="1">
-                                                        {entry.file.name}
-                                                    </Text>
-                                                    <Text fontSize="xs" color="fg.subtle" flexShrink="0">
-                                                        {formatSize(entry.file.size)}
-                                                    </Text>
-                                                    {entry.status === "error" ? (
-                                                        <Tag.Root size="sm" colorPalette="red" variant="subtle">
-                                                            <Tag.Label>{entry.errorReason}</Tag.Label>
-                                                        </Tag.Root>
-                                                    ) : (
-                                                        <Tag.Root size="sm" colorPalette="green" variant="subtle">
-                                                            <Tag.Label>Ready</Tag.Label>
-                                                        </Tag.Root>
-                                                    )}
-                                                    <Button
-                                                        size="xs"
-                                                        variant="ghost"
-                                                        onClick={() => removeFile(i)}
-                                                        aria-label={"Remove " + entry.file.name}
-                                                    >
-                                                        <XIcon />
-                                                    </Button>
-                                                </HStack>
-                                            ))}
-                                        </Box>
-                                    </Stack>
-                                )}
-                            </Stack>
-                        </Dialog.Body>
+                        <Dialog.Body>{content}</Dialog.Body>
                         <Dialog.Footer>
                             <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
                                 Cancel

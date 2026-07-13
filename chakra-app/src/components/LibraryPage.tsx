@@ -4,6 +4,7 @@ import {
     Box,
     Button,
     Center,
+    HStack,
     IconButton,
     Spinner,
     Drawer,
@@ -23,15 +24,32 @@ import type { AssetDto, TagConflict } from "../types"
 
 const PAGE_SIZE = 30
 
+// Convert internal folder value to API folder parameter
+const toApiFolder = (folder: string): string | undefined => {
+    if (folder === "") return undefined // All — no folder filter
+    if (folder === "__root__") return "__root__" // Root directory
+    return folder // specific subdirectory
+}
+
+// Root folder should only show direct files, not subfolder contents.
+// All other views include subfolders by default.
+const getSubfolders = (folder: string): boolean | undefined =>
+    folder === "__root__" ? false : undefined
+
 export function LibraryPage() {
     const { libraryId, "*": splat } = useParams()
     const navigate = useNavigate()
     const location = useLocation()
     const toaster = useCustomToaster()
+    const [treeRefreshKey, setTreeRefreshKey] = useState(0)
 
     // Derive folder and search from URL
-    const folderFromUrl = splat || ""
+    // splat=undefined  → /:libraryId       → All mode → folder=""
+    // splat=""         → /:libraryId/root   → Root mode → folder="__root__"
+    // splat="ai"       → /:libraryId/root/ai → folder="ai"
+    const folderFromUrl = splat === undefined ? "" : (splat === "" ? "__root__" : splat)
     const searchFromUrl = new URLSearchParams(location.search).get("s") || ""
+    const alwaysShowSearchFromUrl = new URLSearchParams(location.search).get("ss") === "1"
 
     const [assets, setAssets] = useState<AssetDto[]>([])
     const [page, setPage] = useState(1)
@@ -50,6 +68,7 @@ export function LibraryPage() {
     const [conflictDialogOpen, setConflictDialogOpen] = useState(false)
     const [resolvingConflicts, setResolvingConflicts] = useState(false)
     const [isMobile, setIsMobile] = useState(false)
+    const [alwaysShowSearch, setAlwaysShowSearch] = useState(alwaysShowSearchFromUrl)
 
     const [libraryName, setLibraryName] = useState("")
     const [libraryFullId, setLibraryFullId] = useState("")
@@ -113,7 +132,7 @@ export function LibraryPage() {
                 setSelectedTags(parsedTags)
             }
 
-            loadAssets(1, searchFromUrl, false, folderFromUrl || undefined)
+            loadAssets(1, searchFromUrl, false, toApiFolder(folderFromUrl), getSubfolders(folderFromUrl))
                 .then(() => {
                     // Check for tag conflicts after initial load
                     api.getTagConflicts().then((conflicts) => {
@@ -139,10 +158,20 @@ export function LibraryPage() {
 
     // Update URL when folder or search changes (skip the initial sync)
     const updateUrl = useCallback((folder: string, query: string) => {
-        const base = `/${libraryId}${folder ? `/${folder}` : ""}`
-        const search = query ? `?s=${encodeURIComponent(query)}` : ""
-        navigate(`${base}${search}`, { replace: true })
-    }, [libraryId, navigate])
+        let base: string
+        if (folder === "") {
+            base = `/${libraryId}` // All
+        } else if (folder === "__root__") {
+            base = `/${libraryId}/root` // Root
+        } else {
+            base = `/${libraryId}/root/${folder}` // subdirectory
+        }
+        const params = new URLSearchParams()
+        if (query) params.set("s", query)
+        if (alwaysShowSearch) params.set("ss", "1")
+        const searchStr = params.toString()
+        navigate(`${base}${searchStr ? `?${searchStr}` : ""}`, { replace: true })
+    }, [libraryId, navigate, alwaysShowSearch])
 
     const loadAssets = useCallback(async (pageNum: number, query: string, append: boolean, folder?: string, subfolders?: boolean) => {
         setLoading(true)
@@ -182,7 +211,7 @@ export function LibraryPage() {
         }
 
         if (!libraryLoading) {
-            loadAssets(1, query, false, currentFolder || undefined)
+            loadAssets(1, query, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
         }
     }, [currentFolder, libraryLoading, loadAssets, updateUrl])
 
@@ -193,7 +222,7 @@ export function LibraryPage() {
         setPage(1)
         updateUrl(currentFolder, tagQuery)
         if (!libraryLoading) {
-            loadAssets(1, tagQuery, false, currentFolder || undefined)
+            loadAssets(1, tagQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
         }
     }, [currentFolder, libraryLoading, loadAssets, updateUrl])
 
@@ -201,19 +230,39 @@ export function LibraryPage() {
         if (loading) return
         const nextPage = page + 1
         setPage(nextPage)
-        loadAssets(nextPage, searchQuery, true, currentFolder || undefined)
+        loadAssets(nextPage, searchQuery, true, toApiFolder(currentFolder), getSubfolders(currentFolder))
     }, [loading, page, searchQuery, loadAssets, currentFolder])
 
     const handleAssetMoved = useCallback(() => {
         setPage(1)
         setAssets([])
-        loadAssets(1, searchQuery, false, currentFolder || undefined, currentFolder === "" ? undefined : false)
+        setTreeRefreshKey((k) => k + 1)
+        loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
     }, [loadAssets, searchQuery, currentFolder])
+
+    const handleMoveAsset = useCallback(async (assetId: string, targetFolder: string) => {
+        try {
+            await api.moveAsset(assetId, targetFolder)
+            toaster.create({
+                title: "Asset moved",
+                description: `Moved to ${targetFolder || "root"}`,
+                type: "success",
+            })
+            handleAssetMoved()
+            setTreeRefreshKey((k) => k + 1)
+        } catch {
+            toaster.create({
+                title: "Move failed",
+                description: "Could not move asset to that folder.",
+                type: "error",
+            })
+        }
+    }, [handleAssetMoved, toaster])
 
     const handleCategorizeSave = useCallback(() => {
         setPage(1)
         setAssets([])
-        loadAssets(1, searchQuery, false, currentFolder || undefined)
+        loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
     }, [loadAssets, searchQuery, currentFolder])
 
     const handleRescan = useCallback(async () => {
@@ -222,7 +271,7 @@ export function LibraryPage() {
             const result = await api.scanAssets()
             setPage(1)
             setAssets([])
-            loadAssets(1, searchQuery, false, currentFolder || undefined, currentFolder === "" ? undefined : false)
+            loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
 
             // Check for tag conflicts
             if (result.tagConflicts && result.tagConflicts.length > 0) {
@@ -251,7 +300,7 @@ export function LibraryPage() {
             // Reload assets to reflect changes
             setPage(1)
             setAssets([])
-            loadAssets(1, searchQuery, false, currentFolder || undefined, currentFolder === "" ? undefined : false)
+            loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
             toaster.create({ title: "Conflicts resolved", type: "success" })
         } catch {
             toaster.create({ title: "Failed to resolve conflicts", type: "error" })
@@ -265,8 +314,7 @@ export function LibraryPage() {
         setPage(1)
         setAssets([])
         updateUrl(folder, searchQuery)
-        const subfolders = folder === "" ? undefined : false
-        loadAssets(1, searchQuery, false, folder || undefined, subfolders)
+        loadAssets(1, searchQuery, false, toApiFolder(folder), getSubfolders(folder))
     }, [loadAssets, updateUrl, searchQuery])
 
     const handleSelectAsset = useCallback((id: string) => {
@@ -309,7 +357,7 @@ export function LibraryPage() {
     }
 
     return (
-        <Box minH="100vh" bg="bg">
+        <Box css={{ height: "100dvh" }} bg="bg" display="flex" flexDirection="column">
             <TopBar
                 searchQuery={searchQuery}
                 onSearchChange={handleSearchChange}
@@ -324,12 +372,32 @@ export function LibraryPage() {
                 libraryPath={libraryPath}
                 libraryId={libraryFullId}
                 onCategorizeSave={handleCategorizeSave}
+                isMobile={isMobile}
+                currentFolder={currentFolder}
+                alwaysShowSearch={alwaysShowSearch}
+                onToggleAlwaysShowSearch={() => {
+                    setAlwaysShowSearch((v) => {
+                        const next = !v
+                        // Update URL to persist the setting
+                        const params = new URLSearchParams(location.search)
+                        if (next) {
+                            params.set("ss", "1")
+                        } else {
+                            params.delete("ss")
+                        }
+                        const searchStr = params.toString()
+                        navigate(`${location.pathname}${searchStr ? `?${searchStr}` : ""}`, { replace: true })
+                        return next
+                    })
+                }}
+                onShowAll={() => handleFolderChange("")}
             />
 
             <Box
                 display="flex"
-                height="calc(100vh - 57px)"
+                flex="1"
                 overflow="hidden"
+                minH="0"
             >
                 {/* Left: Directory Tree (desktop) */}
                 <Box
@@ -341,11 +409,11 @@ export function LibraryPage() {
                     display={{ base: "none", md: "block" }}
                     py="2"
                 >
-                    <DirectoryTree currentFolder={currentFolder} onFolderChange={handleFolderChange} />
+                    <DirectoryTree currentFolder={currentFolder} onFolderChange={handleFolderChange} onMoveAsset={handleMoveAsset} refreshKey={treeRefreshKey} />
                 </Box>
 
                 {/* Center: Masonry */}
-                <Box flex="1" overflow="hidden auto" p={{ base: "2", md: "4" }}>
+                <Box flex="1" overflow="hidden auto" p={{ base: "2", md: "4" }} position="relative" className="masonry-scroll-container">
                     <MasonryGrid
                         assets={assets}
                         loading={loading}
@@ -358,25 +426,34 @@ export function LibraryPage() {
                 </Box>
 
                 {/* Right: Docked Sidebar (desktop only) */}
-                {selectedAssetId && <SidebarPanel assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange([...selectedTags, value])} onRefreshRequested={handleAssetMoved} />}
+                {selectedAssetId && <SidebarPanel assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={handleAssetMoved} />}
             </Box>
 
             <AddAssetDialog
                 open={addDialogOpen}
                 onOpenChange={setAddDialogOpen}
                 toaster={toaster as CustomToaster}
-                onAssetsAdded={() => { setPage(1); setAssets([]); loadAssets(1, searchQuery, false, currentFolder || undefined) }}
+                isMobile={isMobile}
+                onAssetsAdded={() => { setPage(1); setAssets([]); loadAssets(1, searchQuery, false, currentFolder || undefined, getSubfolders(currentFolder)) }}
             />
 
-            {/* Mobile directory drawer */}
-            <Drawer.Root open={mobileTreeOpen} onOpenChange={(e: { open: boolean }) => setMobileTreeOpen(e.open)}>
+            {/* Mobile directory drawer (bottom) */}
+            <Drawer.Root placement="bottom" open={mobileTreeOpen} onOpenChange={(e: { open: boolean }) => setMobileTreeOpen(e.open)}>
                 <Portal>
                     <Drawer.Backdrop />
                     <Drawer.Positioner>
-                        <Drawer.Content>
+                        <Drawer.Content maxH="80vh" borderTopRadius="lg">
                             <Drawer.Header>
-                                <Drawer.Title>Folders</Drawer.Title>
-                                <Drawer.CloseTrigger />
+                                <HStack justify="space-between" width="full">
+                                    <Drawer.Title>Folders</Drawer.Title>
+                                    <Drawer.CloseTrigger asChild>
+                                        <Button variant="ghost" size="sm" aria-label="Close">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <path d="M18 6L6 18M6 6l12 12" />
+                                            </svg>
+                                        </Button>
+                                    </Drawer.CloseTrigger>
+                                </HStack>
                             </Drawer.Header>
                             <Drawer.Body>
                                 <DirectoryTree
@@ -385,6 +462,8 @@ export function LibraryPage() {
                                         handleFolderChange(folder)
                                         setMobileTreeOpen(false)
                                     }}
+                                    onMoveAsset={handleMoveAsset}
+                                    refreshKey={treeRefreshKey}
                                 />
                             </Drawer.Body>
                         </Drawer.Content>
@@ -393,13 +472,24 @@ export function LibraryPage() {
             </Drawer.Root>
 
             {/* Mobile bottom sheet for sidebar */}
-            <Drawer.Root open={!!selectedAssetId && isMobile} onOpenChange={(e: { open: boolean }) => { if (!e.open) setSelectedAssetId(null) }}>
+            <Drawer.Root placement="bottom" open={!!selectedAssetId && isMobile} onOpenChange={(e: { open: boolean }) => { if (!e.open) setSelectedAssetId(null) }}>
                 <Portal>
                     <Drawer.Backdrop />
                     <Drawer.Positioner>
                         <Drawer.Content maxH="80vh" borderTopRadius="lg">
+                            <Drawer.Header>
+                                <HStack justify="flex-end" width="full">
+                                    <Drawer.CloseTrigger asChild>
+                                        <Button variant="ghost" size="sm" aria-label="Close">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <path d="M18 6L6 18M6 6l12 12" />
+                                            </svg>
+                                        </Button>
+                                    </Drawer.CloseTrigger>
+                                </HStack>
+                            </Drawer.Header>
                             <Drawer.Body p="4">
-                                <Sidebar assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange([...selectedTags, value])} onRefreshRequested={handleAssetMoved} />
+                                <Sidebar assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={handleAssetMoved} />
                             </Drawer.Body>
                         </Drawer.Content>
                     </Drawer.Positioner>

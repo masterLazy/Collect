@@ -9,10 +9,12 @@ namespace Collect.Core.Services;
 public class TagService : ITagService
 {
     private readonly IAssetService _assetService;
+    private readonly ILibraryService _libraryService;
 
-    public TagService(IAssetService assetService)
+    public TagService(IAssetService assetService, ILibraryService libraryService)
     {
         _assetService = assetService;
+        _libraryService = libraryService;
     }
 
     public async Task<TagGroupsResponse> GetTagGroupsAsync(int page = 1, int size = 50, string? search = null)
@@ -49,8 +51,11 @@ public class TagService : ITagService
                 Total = g.Count(),
                 Tags = g.OrderByDescending(t => t.Count).ToList()
             })
-            .OrderBy(g => g.Type ?? "zzz") // untyped tags last
             .ToList();
+
+        // Apply category order if available
+        var categoryOrder = await _libraryService.GetCategoryOrderAsync();
+        allGroups = SortGroupsByOrder(allGroups, categoryOrder);
 
         var totalGroups = allGroups.Count;
 
@@ -71,5 +76,29 @@ public class TagService : ITagService
             Groups = pagedGroups,
             TotalGroups = totalGroups
         };
+    }
+
+    /// <summary>
+    /// Sort tag groups by a custom category order.
+    /// Groups with a type in <paramref name="categoryOrder"/> are sorted by their position.
+    /// Groups not in the order list come after, sorted alphabetically.
+    /// The uncategorized group (type=null) always comes last.
+    /// </summary>
+    private static List<TagGroupDto> SortGroupsByOrder(List<TagGroupDto> groups, List<string>? categoryOrder)
+    {
+        if (categoryOrder == null || categoryOrder.Count == 0)
+        {
+            return groups.OrderBy(g => g.Type ?? "zzz").ToList();
+        }
+
+        var orderIndex = categoryOrder
+            .Select((name, index) => (name, index))
+            .ToDictionary(x => x.name, x => x.index, StringComparer.OrdinalIgnoreCase);
+
+        return groups
+            .OrderBy(g => g.Type == null ? 1 : 0) // uncategorized last
+            .ThenBy(g => g.Type != null && orderIndex.TryGetValue(g.Type, out var idx) ? idx : int.MaxValue)
+            .ThenBy(g => g.Type ?? "") // alphabetical for uncategorized ones
+            .ToList();
     }
 }

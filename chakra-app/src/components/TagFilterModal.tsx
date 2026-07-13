@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
     Box,
     Button,
     Dialog,
+    Drawer,
     Field,
     HStack,
     Input,
-    Menu,
     Portal,
     Stack,
     Tag,
@@ -19,6 +19,7 @@ interface TagFilterModalProps {
     selectedTags: string[]
     onTagsChange: (tags: string[]) => void
     onCategorizeSave?: () => void
+    isMobile?: boolean
 }
 
 // Deterministic color map for tag types
@@ -81,7 +82,232 @@ function UndoIcon() {
 
 const PAGE_SIZE = 20
 
-export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }: TagFilterModalProps) {
+// ── Memoized category list items for performance ──
+
+interface CategoryItemProps {
+    cat: string
+    index: number
+    isSelected: boolean
+    isDragOverCat: boolean
+    isDragOverTag: boolean
+    isDragging: boolean
+    isHovered: boolean
+    pendingRenameTarget: string | null
+    isPendingDelete: boolean
+    onSelect: (cat: string) => void
+    onDragStart: (e: React.DragEvent, index: number) => void
+    onDragOver: (e: React.DragEvent, cat: string | null) => void
+    onDragLeave: () => void
+    onDrop: (e: React.DragEvent, cat: string | null) => void
+    onMouseEnter: (cat: string) => void
+    onMouseLeave: () => void
+    onRename: (cat: string) => void
+    onDelete: (cat: string) => void
+}
+
+const CategoryListItem = memo(function CategoryListItem({
+    cat, index, isSelected, isDragOverCat, isDragOverTag, isDragging, isHovered,
+    pendingRenameTarget, isPendingDelete,
+    onSelect, onDragStart, onDragOver, onDragLeave, onDrop,
+    onMouseEnter, onMouseLeave, onRename, onDelete,
+}: CategoryItemProps) {
+    const showPendingIndicator = pendingRenameTarget !== null || isPendingDelete
+    return (
+        <HStack
+            px="2"
+            py="1.5"
+            borderRadius="md"
+            cursor="grab"
+            draggable
+            bg={isDragOverCat || isDragOverTag
+                ? { base: "blue.100", _dark: "blue.800" }
+                : isPendingDelete
+                    ? { base: "red.50", _dark: "red.950" }
+                    : isSelected
+                        ? "bg.subtle"
+                        : "transparent"}
+            _hover={{ bg: isPendingDelete ? { base: "red.50", _dark: "red.950" } : "bg.subtle" }}
+            onClick={() => onSelect(cat)}
+            onDragStart={(e) => onDragStart(e, index)}
+            onDragOver={(e) => onDragOver(e, cat)}
+            onDragLeave={onDragLeave}
+            onDrop={(e) => onDrop(e, cat)}
+            onMouseEnter={() => onMouseEnter(cat)}
+            onMouseLeave={onMouseLeave}
+            gap="0"
+            opacity={isDragging ? 0.4 : 1}
+            transition="opacity 0.15s, background 0.1s"
+        >
+            <Text
+                fontSize="sm"
+                fontWeight={isSelected ? "bold" : "normal"}
+                color={isPendingDelete ? { base: "red.500", _dark: "red.400" } : "fg"}
+                textDecoration={isPendingDelete ? "line-through" : "none"}
+                truncate
+                flex="1"
+            >
+                {cat}
+                {pendingRenameTarget && (
+                    <Text as="span" color={{ _light: "orange.600", _dark: "orange.400" }} fontSize="xs" ml="1">
+                        → {pendingRenameTarget}
+                    </Text>
+                )}
+                {isPendingDelete && (
+                    <Text as="span" color={{ _light: "red.500", _dark: "red.400" }} fontSize="xs" ml="1">
+                        (deleted)
+                    </Text>
+                )}
+            </Text>
+            {showPendingIndicator && (
+                <Box
+                    width="8px"
+                    height="8px"
+                    borderRadius="full"
+                    bg={isPendingDelete ? "red.500" : "orange.500"}
+                    flexShrink="0"
+                    mr="1"
+                />
+            )}
+            <Box
+                display={isHovered ? "inline-flex" : "none"}
+                gap="1"
+                flexShrink="0"
+                alignItems="center"
+            >
+                <Box
+                    as="button"
+                    display="inline-flex"
+                    alignItems="center"
+                    justifyContent="center"
+                    width="20px"
+                    height="20px"
+                    borderRadius="sm"
+                    cursor="pointer"
+                    color={{ _light: "orange.600", _dark: "orange.400" }}
+                    _hover={{ bg: { base: "blackAlpha.200", _dark: "whiteAlpha.200" } }}
+                    onClick={(e: React.MouseEvent) => { e.stopPropagation(); onRename(cat); }}
+                    aria-label="Rename category"
+                    tabIndex={-1}
+                    title="Rename"
+                >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                    </svg>
+                </Box>
+                <Box
+                    as="button"
+                    display="inline-flex"
+                    alignItems="center"
+                    justifyContent="center"
+                    width="20px"
+                    height="20px"
+                    borderRadius="sm"
+                    cursor="pointer"
+                    color={{ _light: "red.500", _dark: "red.400" }}
+                    _hover={{ bg: { base: "blackAlpha.200", _dark: "whiteAlpha.200" } }}
+                    onClick={(e: React.MouseEvent) => { e.stopPropagation(); onDelete(cat); }}
+                    aria-label="Delete category"
+                    tabIndex={-1}
+                    title="Delete"
+                >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    </svg>
+                </Box>
+            </Box>
+        </HStack>
+    )
+})
+
+// ── Memoized tags panel — prevents left-panel state changes from re-rendering right panel ──
+
+interface TagsPanelProps {
+    filteredGroups: TagGroupsResponse["groups"]
+    selectedTags: string[]
+    hasMoreInFiltered: boolean
+    loadingMore: boolean
+    isEmpty: boolean
+    onToggleTag: (value: string) => void
+    onShowMore: () => void
+    onTagDragStart: (e: React.DragEvent, tagValue: string, groupType: string | null) => void
+}
+
+const TagsPanel = memo(function TagsPanel({
+    filteredGroups, selectedTags, hasMoreInFiltered, loadingMore,
+    isEmpty, onToggleTag, onShowMore, onTagDragStart,
+}: TagsPanelProps) {
+    return (
+        <Box
+            flex="1"
+            minH="300px"
+            maxH="60vh"
+            overflowY="auto"
+            // Prevent browser default drag behavior when tags are dropped back in the right panel
+            onDragOver={(e) => e.preventDefault()}
+        >
+            {filteredGroups.map((group) => (
+                <Box key={group.type ?? "__untagged"} mb="4">
+                    <Text fontWeight="semibold" fontSize="sm" color="fg" mb="2">
+                        {group.type ?? "Uncategorized"}
+                    </Text>
+                    <HStack gap="2" flexWrap="wrap">
+                        {group.tags.map((t) => {
+                            const isSelected = selectedTags.includes(t.value)
+                            const groupColor = group.type ? getTypeColor(group.type) : "gray"
+                            const colorPalette = groupColor
+                            return (
+                                <Box
+                                    key={t.value}
+                                    role="group"
+                                    display="inline-flex"
+                                    cursor="pointer"
+                                    onClick={() => onToggleTag(t.value)}
+                                    draggable
+                                    onDragStart={(e) => onTagDragStart(e, t.value, group.type)}
+                                >
+                                    <Tag.Root
+                                        size="lg"
+                                        colorPalette={colorPalette}
+                                        variant={isSelected ? "solid" : "subtle"}
+                                        borderRadius="full"
+                                        display="inline-flex"
+                                        alignItems="center"
+                                        px="2.5"
+                                        py="1"
+                                        opacity={group.type ? 0.85 : 1}
+                                    >
+                                        <Tag.Label fontSize="sm">{t.value}</Tag.Label>
+                                        <Text as="span" fontSize="xs" color={isSelected ? "white" : "fg.muted"} ml="1">
+                                            ({t.count})
+                                        </Text>
+                                    </Tag.Root>
+                                </Box>
+                            )
+                        })}
+                    </HStack>
+                </Box>
+            ))}
+            {hasMoreInFiltered && (
+                <Button
+                    variant="ghost"
+                    size="xs"
+                    mt="2"
+                    onClick={onShowMore}
+                    loading={loadingMore}
+                    colorPalette="accent"
+                >
+                    Show more
+                </Button>
+            )}
+            {isEmpty && (
+                <Text color="fg.muted" fontSize="sm">No tags found</Text>
+            )}
+        </Box>
+    )
+})
+
+export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, isMobile }: TagFilterModalProps) {
     const [open, setOpen] = useState(false)
     const [tagData, setTagData] = useState<TagGroupsResponse | null>(null)
     const [searchTerm, setSearchTerm] = useState("")
@@ -92,6 +318,9 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
     const [saving, setSaving] = useState(false)
     const [localCategories, setLocalCategories] = useState<string[]>([])
     const [dragOverCategory, setDragOverCategory] = useState<string | null | undefined>(undefined)
+    const [categoryOrder, setCategoryOrder] = useState<string[]>([])
+    const [dragCatIndex, setDragCatIndex] = useState<number | null>(null)
+    const [dragOverCatIndex, setDragOverCatIndex] = useState<number | null>(null)
     const [createDialogOpen, setCreateDialogOpen] = useState(false)
     const [createCategoryName, setCreateCategoryName] = useState("")
     const [selectedCreateTags, setSelectedCreateTags] = useState<Set<string>>(new Set())
@@ -101,24 +330,26 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
     const tagDataRef = useRef<TagGroupsResponse | null>(null)
     const dragOverRef = useRef<string | null | undefined>(undefined)
 
+    // Pending category renames/deletes (not yet saved)
+    const [pendingCategoryRenames, setPendingCategoryRenames] = useState<Map<string, string>>(new Map())
+    const [pendingCategoryDeletes, setPendingCategoryDeletes] = useState<Set<string>>(new Set())
+
     // Category rename/delete state
     const [catHovered, setCatHovered] = useState<string | null>(null)
     const [catRenameOpen, setCatRenameOpen] = useState(false)
     const [catRenameOldType, setCatRenameOldType] = useState("")
     const [catRenameNewType, setCatRenameNewType] = useState("")
-    const [catRenaming, setCatRenaming] = useState(false)
     const [catDeleteOpen, setCatDeleteOpen] = useState(false)
     const [catDeleteType, setCatDeleteType] = useState("")
-    const [catDeleting, setCatDeleting] = useState(false)
 
     // Keep ref in sync
     useEffect(() => {
         tagDataRef.current = tagData
     }, [tagData])
 
-    const hasChanges = pendingChanges.size > 0
+    const hasChanges = pendingChanges.size > 0 || pendingCategoryRenames.size > 0 || pendingCategoryDeletes.size > 0
 
-    const loadTags = async (page: number, search: string, append: boolean) => {
+    const loadTags = useCallback(async (page: number, search: string, append: boolean) => {
         setLoadingMore(true)
         try {
             const result = await api.getTags(page, PAGE_SIZE, search || undefined)
@@ -144,7 +375,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
         } finally {
             setLoadingMore(false)
         }
-    }
+    }, [])
 
     useEffect(() => {
         if (open) {
@@ -154,7 +385,14 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
             setTagData(null)
             setPendingChanges(new Map())
             setLocalCategories([])
+            setCategoryOrder([])
             loadTags(1, "", false)
+            // Load category order from library info
+            api.getLibraryInfo().then((info) => {
+                if (info.categoryOrder) {
+                    setCategoryOrder(info.categoryOrder)
+                }
+            }).catch(() => { })
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open])
@@ -164,12 +402,14 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
         const onDragEnd = () => {
             dragOverRef.current = undefined
             setDragOverCategory(undefined)
+            setDragCatIndex(null)
+            setDragOverCatIndex(null)
         }
         window.addEventListener("dragend", onDragEnd)
         return () => window.removeEventListener("dragend", onDragEnd)
     }, [])
 
-    const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const value = e.target.value
         setSearchTerm(value)
         if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
@@ -178,33 +418,33 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
             setTagData(null)
             loadTags(1, value, false)
         }, 300)
-    }
+    }, [loadTags])
 
-    const handleShowMore = () => {
+    const handleShowMore = useCallback(() => {
         loadTags(currentPage + 1, searchTerm, true)
-    }
+    }, [loadTags, currentPage, searchTerm])
 
-    const toggleTag = (value: string) => {
+    const toggleTag = useCallback((value: string) => {
         if (selectedTags.includes(value)) {
             onTagsChange(selectedTags.filter((t) => t !== value))
         } else {
             onTagsChange([...selectedTags, value])
         }
-    }
+    }, [selectedTags, onTagsChange])
 
-    const handleClear = () => {
+    const handleClear = useCallback(() => {
         onTagsChange([])
-    }
+    }, [onTagsChange])
 
     // Create category dialog handlers
-    const handleOpenCreateDialog = () => {
+    const handleOpenCreateDialog = useCallback(() => {
         setCreateCategoryName("")
         setSelectedCreateTags(new Set())
         setCreateTagPage(0)
         setCreateDialogOpen(true)
-    }
+    }, [])
 
-    const handleCreateCategory = () => {
+    const handleCreateCategory = useCallback(() => {
         const name = createCategoryName.trim()
         if (!name || selectedCreateTags.size === 0) return
         setLocalCategories((prev) => [...prev, name])
@@ -237,40 +477,177 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
         setCreateDialogOpen(false)
         setCreateCategoryName("")
         setSelectedCreateTags(new Set())
-    }
+    }, [createCategoryName, selectedCreateTags])
 
-    const handleToggleCreateTag = (tagValue: string) => {
+    const handleToggleCreateTag = useCallback((tagValue: string) => {
         setSelectedCreateTags((prev) => {
             const next = new Set(prev)
             if (next.has(tagValue)) next.delete(tagValue)
             else next.add(tagValue)
             return next
         })
-    }
+    }, [])
 
     // Drag handlers — use ref to avoid lag from excessive re-renders on every dragOver event
-    const handleTagDragStart = (e: React.DragEvent, tagValue: string, currentType: string | null) => {
+    const handleTagDragStart = useCallback((e: React.DragEvent, tagValue: string, currentType: string | null) => {
         e.dataTransfer.setData("text/plain", tagValue)
         e.dataTransfer.setData("application/x-type", currentType ?? "")
         // Reset drag-over state from any previous drag
         dragOverRef.current = undefined
         setDragOverCategory(undefined)
-    }
+    }, [])
 
-    const handleCategoryDragOver = (e: React.DragEvent, cat: string | null) => {
-        e.preventDefault()
-        if (dragOverRef.current === cat) return // skip if same as current — avoids useless re-renders
-        dragOverRef.current = cat
-        setDragOverCategory(cat)
-    }
+    // Category reorder drag handlers
+    const handleCatDragStart = useCallback((e: React.DragEvent, index: number) => {
+        e.dataTransfer.effectAllowed = "move"
+        e.dataTransfer.setData("application/x-cat-index", String(index))
+        setDragCatIndex(index)
+    }, [])
 
-    const handleCategoryDragLeave = () => {
+    const handleCategoryDragLeave = useCallback(() => {
         dragOverRef.current = undefined
         setDragOverCategory(undefined)
+        setDragOverCatIndex(null)
+    }, [])
+
+    // Look up a tag entry from original data or from the rendered state
+    const findTagEntry = (value: string): { value: string; count: number } | null => {
+        for (const g of tagDataRef.current?.groups ?? []) {
+            const found = g.tags.find((t) => t.value === value)
+            if (found) return found
+        }
+        return null
     }
 
-    const handleCategoryDrop = (e: React.DragEvent, newType: string | null) => {
+    const applyPendingChanges = useCallback(async () => {
+        if (!hasChanges) return
+        setSaving(true)
+        try {
+            // 1. Apply category renames — convert to array first to avoid iterator issues
+            const renameEntries: [string, string][] = []
+            pendingCategoryRenames.forEach((v, k) => renameEntries.push([k, v]))
+            for (let i = 0; i < renameEntries.length; i++) {
+                await api.renameCategory(renameEntries[i][0], renameEntries[i][1])
+            }
+            // 2. Apply category deletes
+            const deleteEntries: string[] = []
+            pendingCategoryDeletes.forEach((v) => deleteEntries.push(v))
+            for (let i = 0; i < deleteEntries.length; i++) {
+                await api.deleteCategory(deleteEntries[i])
+            }
+            // 3. Apply individual tag categorization changes
+            if (pendingChanges.size > 0) {
+                const changes = Array.from(pendingChanges.entries()).map(([tagValue, newType]) => ({
+                    tagValue,
+                    newType,
+                }))
+                await api.categorizeTags(changes)
+            }
+
+            // 4. Update category order: replace renamed categories, remove deleted ones
+            let updatedOrder = [...categoryOrder]
+            for (const [oldName, newName] of renameEntries) {
+                const idx = updatedOrder.indexOf(oldName)
+                if (idx >= 0) {
+                    updatedOrder[idx] = newName
+                }
+            }
+            updatedOrder = updatedOrder.filter((name) => !pendingCategoryDeletes.has(name))
+            if (updatedOrder.length > 0) {
+                await api.saveCategoryOrder(updatedOrder)
+            }
+            setCategoryOrder(updatedOrder)
+
+            setPendingChanges(new Map())
+            setPendingCategoryRenames(new Map())
+            setPendingCategoryDeletes(new Set())
+            setOpen(false)
+            onCategorizeSave?.()
+        } catch {
+            // Close dialog on error too so the user isn't stuck
+            setOpen(false)
+        } finally {
+            setSaving(false)
+        }
+    }, [hasChanges, pendingChanges, pendingCategoryRenames, pendingCategoryDeletes, categoryOrder, onCategorizeSave])
+
+    const resetPendingChanges = useCallback(() => {
+        setPendingChanges(new Map())
+        setPendingCategoryRenames(new Map())
+        setPendingCategoryDeletes(new Set())
+        // Reload tags to reset local state
+        setTagData(null)
+        loadTags(1, searchTerm, false)
+    }, [loadTags, searchTerm])
+
+    // Derive categories from tagData + localCategories
+    const serverCategories = useMemo(() => tagData?.groups
+        .filter((g) => g.type !== null)
+        .map((g) => g.type!) ?? [], [tagData])
+    const allCategories = useMemo(() => {
+        const cats = Array.from(new Set([...serverCategories, ...localCategories]))
+        // Sort by categoryOrder if available
+        if (categoryOrder.length > 0) {
+            const orderIndex = new Map(categoryOrder.map((name, idx) => [name, idx]))
+            return [...cats].sort((a, b) => {
+                const ai = orderIndex.get(a) ?? Number.MAX_SAFE_INTEGER
+                const bi = orderIndex.get(b) ?? Number.MAX_SAFE_INTEGER
+                return ai - bi
+            })
+        }
+        return cats
+    }, [serverCategories, localCategories, categoryOrder])
+
+    // ── Category drag-over/drop handlers (must be after allCategories) ──
+
+    const handleCategoryDragOver = useCallback((e: React.DragEvent, cat: string | null) => {
         e.preventDefault()
+        if (e.dataTransfer.types.includes("application/x-cat-index")) {
+            // Category reorder
+            const idx = allCategories.indexOf(cat ?? "")
+            if (idx >= 0) setDragOverCatIndex(idx)
+            return
+        }
+        // Tag drop
+        if (dragOverRef.current === cat) return
+        dragOverRef.current = cat
+        setDragOverCategory(cat)
+    }, [allCategories])
+
+    const handleCategoryDrop = useCallback((e: React.DragEvent, newType: string | null) => {
+        e.preventDefault()
+        // Check if this is a category reorder
+        const catIndexStr = e.dataTransfer.getData("application/x-cat-index")
+        // Always clear drag indices first
+        setDragCatIndex(null)
+        setDragOverCatIndex(null)
+
+        if (catIndexStr) {
+            const dragIndex = parseInt(catIndexStr, 10)
+            const dropIndex = newType ? allCategories.indexOf(newType) : -1
+            if (!isNaN(dragIndex) && dropIndex >= 0 && dragIndex !== dropIndex) {
+                const newOrder = [...allCategories]
+                const [moved] = newOrder.splice(dragIndex, 1)
+                newOrder.splice(dropIndex, 0, moved)
+                setCategoryOrder(newOrder)
+                api.saveCategoryOrder(newOrder).catch(() => { })
+                // Re-sort the tag groups to match the new order immediately
+                setTagData((prev) => {
+                    if (!prev) return prev
+                    const orderIndex = new Map(newOrder.map((name, idx) => [name, idx]))
+                    const sorted = [...prev.groups].sort((a, b) => {
+                        if (a.type === null && b.type === null) return 0
+                        if (a.type === null) return 1
+                        if (b.type === null) return -1
+                        const ai = orderIndex.get(a.type) ?? Number.MAX_SAFE_INTEGER
+                        const bi = orderIndex.get(b.type) ?? Number.MAX_SAFE_INTEGER
+                        return ai - bi
+                    })
+                    return { ...prev, groups: sorted }
+                })
+            }
+            return
+        }
         // Clear drag-over highlight
         dragOverRef.current = undefined
         setDragOverCategory(undefined)
@@ -309,50 +686,8 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
             }
             return { ...prev, groups: groups.filter((g) => g.tags.length > 0 || g.type !== null) }
         })
-    }
+    }, [allCategories])
 
-    // Look up a tag entry from original data or from the rendered state
-    const findTagEntry = (value: string): { value: string; count: number } | null => {
-        for (const g of tagDataRef.current?.groups ?? []) {
-            const found = g.tags.find((t) => t.value === value)
-            if (found) return found
-        }
-        return null
-    }
-
-    const applyPendingChanges = async () => {
-        if (pendingChanges.size === 0) return
-        setSaving(true)
-        try {
-            const changes = Array.from(pendingChanges.entries()).map(([tagValue, newType]) => ({
-                tagValue,
-                newType,
-            }))
-            await api.categorizeTags(changes)
-            setPendingChanges(new Map())
-            setOpen(false)
-            onCategorizeSave?.()
-        } catch {
-            // ignore
-        } finally {
-            setSaving(false)
-        }
-    }
-
-    const resetPendingChanges = () => {
-        setPendingChanges(new Map())
-        // Reload tags to reset local state
-        setTagData(null)
-        loadTags(1, searchTerm, false)
-    }
-
-    // Derive categories from tagData + localCategories
-    const serverCategories = useMemo(() => tagData?.groups
-        .filter((g) => g.type !== null)
-        .map((g) => g.type!) ?? [], [tagData])
-    const allCategories = useMemo(() =>
-        Array.from(new Set([...serverCategories, ...localCategories])),
-        [serverCategories, localCategories])
     const uncategorizedTags = useMemo(() => tagData?.groups
         .find((g) => g.type === null)
         ?.tags ?? [], [tagData])
@@ -374,41 +709,235 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
 
     // ---- Category rename/delete handlers ----
 
-    const handleCatRename = async () => {
+    const handleCatRename = useCallback(() => {
         const newType = catRenameNewType.trim()
         if (!newType || newType === catRenameOldType) return
-        setCatRenaming(true)
-        try {
-            await api.renameCategory(catRenameOldType, newType)
-            setCatRenameOpen(false)
-            setTagData(null)
-            loadTags(1, "", false)
-        } catch {
-            // silently fail
-        } finally {
-            setCatRenaming(false)
-        }
-    }
+        // Remove from pending deletes if it was there
+        setPendingCategoryDeletes((prev) => {
+            const next = new Set(prev)
+            next.delete(catRenameOldType)
+            return next
+        })
+        // Also remove any previous rename of this category
+        setPendingCategoryRenames((prev) => {
+            const next = new Map(prev)
+            next.set(catRenameOldType, newType)
+            return next
+        })
+        // Update local tagData immediately for visual feedback
+        setTagData((prev) => {
+            if (!prev) return prev
+            return {
+                ...prev,
+                groups: prev.groups.map((g) => {
+                    if (g.type === catRenameOldType) {
+                        return { ...g, type: newType }
+                    }
+                    return g
+                }),
+            }
+        })
+        setCatRenameOpen(false)
+    }, [catRenameNewType, catRenameOldType])
 
-    const handleCatDelete = async () => {
-        setCatDeleting(true)
-        try {
-            await api.deleteCategory(catDeleteType)
-            setCatDeleteOpen(false)
-            setSelectedCategory(null)
-            setTagData(null)
-            loadTags(1, "", false)
-        } catch {
-            // silently fail
-        } finally {
-            setCatDeleting(false)
-        }
-    }
+    const handleCatDelete = useCallback(() => {
+        // If there's a pending rename for this category, cancel it
+        setPendingCategoryRenames((prev) => {
+            const next = new Map(prev)
+            next.delete(catDeleteType)
+            return next
+        })
+        setPendingCategoryDeletes((prev) => {
+            const next = new Set(prev)
+            next.add(catDeleteType)
+            return next
+        })
+        // Update local tagData immediately: move all tags from this category to uncategorized
+        setTagData((prev) => {
+            if (!prev) return prev
+            const deletedTags: { value: string; count: number }[] = []
+            const groups = prev.groups.filter((g) => {
+                if (g.type === catDeleteType) {
+                    deletedTags.push(...g.tags)
+                    return false
+                }
+                return true
+            })
+            // Add deleted tags to uncategorized
+            const uncatGroup = groups.find((g) => g.type === null)
+            if (uncatGroup) {
+                uncatGroup.tags.push(...deletedTags)
+                uncatGroup.total += deletedTags.length
+            } else if (deletedTags.length > 0) {
+                groups.push({ type: null, total: deletedTags.length, tags: deletedTags })
+            }
+            return { ...prev, groups }
+        })
+        setCatDeleteOpen(false)
+        setSelectedCategory(null)
+    }, [catDeleteType])
 
-    return (
-        <Dialog.Root open={open} onOpenChange={(e: { open: boolean }) => setOpen(e.open)}>
-            <Dialog.Trigger asChild>
-                <Button variant="outline" size="sm">
+    // ── Stable category callbacks for CategoryListItem ──
+
+    const handleSelectCategory = useCallback((cat: string) => {
+        setSelectedCategory(cat)
+    }, [])
+
+    const handleCategoryMouseEnter = useCallback((cat: string) => {
+        setCatHovered(cat)
+    }, [])
+
+    const handleCategoryMouseLeave = useCallback(() => {
+        setCatHovered(null)
+    }, [])
+
+    const handleCategoryRename = useCallback((cat: string) => {
+        setCatRenameOldType(cat)
+        setCatRenameNewType(cat)
+        setCatRenameOpen(true)
+    }, [])
+
+    const handleCategoryDelete = useCallback((cat: string) => {
+        setCatDeleteType(cat)
+        setCatDeleteOpen(true)
+    }, [])
+
+    // Stable callbacks for the "All" item (always passes null as category)
+    const handleSelectAll = useCallback(() => setSelectedCategory(null), [])
+    const handleAllDragOver = useCallback((e: React.DragEvent) => {
+        handleCategoryDragOver(e, null)
+    }, [handleCategoryDragOver])
+    const handleAllDrop = useCallback((e: React.DragEvent) => {
+        handleCategoryDrop(e, null)
+    }, [handleCategoryDrop])
+
+    // ── Category list items (shared between desktop and mobile) ──
+
+    const allCategoryItems = (
+        <>
+            <Box
+                px="2"
+                py="1.5"
+                borderRadius="md"
+                cursor="pointer"
+                bg={dragOverCategory === null
+                    ? { base: "blue.100", _dark: "blue.800" }
+                    : selectedCategory === null
+                        ? { base: "blue.50", _dark: "blue.950" }
+                        : { base: "blue.50/30", _dark: "blue.950/20" }}
+                _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
+                onClick={handleSelectAll}
+                onDragOver={handleAllDragOver}
+                onDragLeave={handleCategoryDragLeave}
+                onDrop={handleAllDrop}
+            >
+                <Text
+                    fontSize="sm"
+                    fontWeight="semibold"
+                    color={{ _light: "blue.700", _dark: "blue.300" }}
+                >
+                    All
+                </Text>
+            </Box>
+            {allCategories.map((cat, index) => (
+                <CategoryListItem
+                    key={cat}
+                    cat={cat}
+                    index={index}
+                    isSelected={selectedCategory === cat}
+                    isDragOverCat={dragOverCatIndex === index}
+                    isDragOverTag={dragOverCategory === cat}
+                    isDragging={dragCatIndex === index}
+                    isHovered={catHovered === cat}
+                    pendingRenameTarget={pendingCategoryRenames.get(cat) ?? null}
+                    isPendingDelete={pendingCategoryDeletes.has(cat)}
+                    onSelect={handleSelectCategory}
+                    onDragStart={handleCatDragStart}
+                    onDragOver={handleCategoryDragOver}
+                    onDragLeave={handleCategoryDragLeave}
+                    onDrop={handleCategoryDrop}
+                    onMouseEnter={handleCategoryMouseEnter}
+                    onMouseLeave={handleCategoryMouseLeave}
+                    onRename={handleCategoryRename}
+                    onDelete={handleCategoryDelete}
+                />
+            ))}
+            {/* Add category button — opens create dialog */}
+            <Box
+                px="2"
+                py="1"
+                cursor="pointer"
+                _hover={{ bg: "bg.subtle" }}
+                onClick={handleOpenCreateDialog}
+                borderRadius="md"
+            >
+                <HStack gap="1" color="fg.subtle">
+                    <PlusIcon />
+                    <Text fontSize="xs">Add</Text>
+                </HStack>
+            </Box>
+        </>
+    )
+
+    const categoryList = (
+        <Stack gap="0">
+            {allCategoryItems}
+        </Stack>
+    )
+
+    const trigger = (
+        <Dialog.Trigger asChild>
+            <Button variant="outline" size="sm">
+                <FilterIcon />
+                <Box as="span" display={{ base: "none", sm: "inline" }} ml="1">Tags</Box>
+                {selectedTags.length > 0 && (
+                    <Tag.Root size="sm" colorPalette="accent" ml="1">
+                        <Tag.Label>{selectedTags.length}</Tag.Label>
+                    </Tag.Root>
+                )}
+            </Button>
+        </Dialog.Trigger>
+    )
+
+    const searchInput = (
+        <Input
+            placeholder="Search tags..."
+            value={searchTerm}
+            onChange={handleSearchChange}
+            bg="bg"
+            border="1px solid"
+            borderColor="border"
+            size="sm"
+        />
+    )
+
+    const footer = (
+        <HStack width="full" justify="space-between">
+            <Button variant="outline" size="sm" onClick={handleClear} disabled={selectedTags.length === 0}>
+                Clear
+            </Button>
+            <HStack gap="2">
+                {hasChanges && (
+                    <Button variant="ghost" size="sm" onClick={resetPendingChanges} title="Discard changes" aria-label="Discard pending changes">
+                        <UndoIcon />
+                    </Button>
+                )}
+                <Button
+                    colorPalette="accent"
+                    size="sm"
+                    onClick={hasChanges ? applyPendingChanges : () => setOpen(false)}
+                    loading={saving}
+                >
+                    {hasChanges ? "Done & Save" : "Done"}
+                </Button>
+            </HStack>
+        </HStack>
+    )
+
+    if (isMobile) {
+        return (
+            <>
+                <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
                     <FilterIcon />
                     <Box as="span" display={{ base: "none", sm: "inline" }} ml="1">Tags</Box>
                     {selectedTags.length > 0 && (
@@ -417,7 +946,90 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
                         </Tag.Root>
                     )}
                 </Button>
-            </Dialog.Trigger>
+                <Drawer.Root placement="bottom" open={open} onOpenChange={(e: { open: boolean }) => setOpen(e.open)}>
+                    <Portal>
+                        <Drawer.Backdrop />
+                        <Drawer.Positioner>
+                            <Drawer.Content maxH="85vh" borderTopRadius="lg">
+                                <Drawer.Header>
+                                    <HStack justify="space-between" width="full">
+                                        <Drawer.Title>
+                                            Filter by Tags
+                                            {hasChanges && <Box as="span" color="red" ml="1">*</Box>}
+                                        </Drawer.Title>
+                                        <Drawer.CloseTrigger asChild>
+                                            <Button variant="ghost" size="sm">
+                                                <XIcon />
+                                            </Button>
+                                        </Drawer.CloseTrigger>
+                                    </HStack>
+                                </Drawer.Header>
+                                <Drawer.Body>
+                                    <Stack gap="3">
+                                        {searchInput}
+                                        {/* Categories at top — simple pills, no editing */}
+                                        <HStack gap="1" flexWrap="wrap">
+                                            <Box
+                                                px="2.5"
+                                                py="1"
+                                                borderRadius="full"
+                                                border="1px solid"
+                                                borderColor={selectedCategory === null ? "accent.solid" : "border"}
+                                                bg={selectedCategory === null ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
+                                                cursor="pointer"
+                                                onClick={handleSelectAll}
+                                                fontSize="sm"
+                                                fontWeight={selectedCategory === null ? "semibold" : "normal"}
+                                                color={selectedCategory === null ? { _light: "blue.700", _dark: "blue.300" } : "fg"}
+                                            >
+                                                All
+                                            </Box>
+                                            {allCategories.map((cat) => (
+                                                <Box
+                                                    key={cat}
+                                                    px="2.5"
+                                                    py="1"
+                                                    borderRadius="full"
+                                                    border="1px solid"
+                                                    borderColor={selectedCategory === cat ? "accent.solid" : "border"}
+                                                    bg={selectedCategory === cat ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
+                                                    cursor="pointer"
+                                                    onClick={() => handleSelectCategory(cat)}
+                                                    fontSize="sm"
+                                                    fontWeight={selectedCategory === cat ? "semibold" : "normal"}
+                                                    color={selectedCategory === cat ? { _light: "blue.700", _dark: "blue.300" } : "fg"}
+                                                >
+                                                    {cat}
+                                                </Box>
+                                            ))}
+                                        </HStack>
+                                        {/* Tags below */}
+                                        <TagsPanel
+                                            filteredGroups={filteredGroups}
+                                            selectedTags={selectedTags}
+                                            hasMoreInFiltered={hasMoreInFiltered}
+                                            loadingMore={loadingMore}
+                                            isEmpty={!tagData || filteredGroups.length === 0}
+                                            onToggleTag={toggleTag}
+                                            onShowMore={handleShowMore}
+                                            onTagDragStart={handleTagDragStart}
+                                        />
+                                    </Stack>
+                                </Drawer.Body>
+                                <Drawer.Footer>
+                                    {footer}
+                                </Drawer.Footer>
+                            </Drawer.Content>
+                        </Drawer.Positioner>
+                    </Portal>
+                </Drawer.Root>
+            </>
+        )
+    }
+
+    return (
+        <Dialog.Root open={open} onOpenChange={(e: { open: boolean }) => setOpen(e.open)}>
+            {trigger}
             <Portal>
                 <Dialog.Backdrop />
                 <Dialog.Positioner>
@@ -437,16 +1049,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
                         </Dialog.Header>
                         <Dialog.Body>
                             <Stack gap="4">
-                                {/* Search input — full width */}
-                                <Input
-                                    placeholder="Search tags..."
-                                    value={searchTerm}
-                                    onChange={handleSearchChange}
-                                    bg="bg"
-                                    border="1px solid"
-                                    borderColor="border"
-                                    size="sm"
-                                />
+                                {searchInput}
 
                                 {/* Two-column layout */}
                                 <HStack gap="4" align="flex-start">
@@ -460,216 +1063,25 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
                                         pr="3"
                                     >
                                         <Text fontWeight="semibold" fontSize="sm" color="fg" mb="3">Categories</Text>
-                                        <Stack gap="0">
-                                            {/* "All" — also a drop target to uncategorize */}
-                                            <Box
-                                                px="2"
-                                                py="1.5"
-                                                borderRadius="md"
-                                                cursor="pointer"
-                                                bg={dragOverCategory === null
-                                                    ? { base: "blue.100", _dark: "blue.800" }
-                                                    : selectedCategory === null
-                                                        ? { base: "blue.50", _dark: "blue.950" }
-                                                        : { base: "blue.50/30", _dark: "blue.950/20" }}
-                                                _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
-                                                onClick={() => setSelectedCategory(null)}
-                                                onDragOver={(e) => handleCategoryDragOver(e, null)}
-                                                onDragLeave={handleCategoryDragLeave}
-                                                onDrop={(e) => handleCategoryDrop(e, null)}
-                                            >
-                                                <Text
-                                                    fontSize="sm"
-                                                    fontWeight="semibold"
-                                                    color={{ _light: "blue.700", _dark: "blue.300" }}
-                                                >
-                                                    All
-                                                </Text>
-                                            </Box>
-                                            {allCategories.map((cat) => (
-                                                <HStack
-                                                    key={cat}
-                                                    px="2"
-                                                    py="1.5"
-                                                    borderRadius="md"
-                                                    cursor="pointer"
-                                                    bg={dragOverCategory === cat
-                                                        ? { base: "blue.100", _dark: "blue.800" }
-                                                        : selectedCategory === cat
-                                                            ? "bg.subtle"
-                                                            : "transparent"}
-                                                    _hover={{ bg: "bg.subtle" }}
-                                                    onClick={() => setSelectedCategory(cat)}
-                                                    onDragOver={(e) => handleCategoryDragOver(e, cat)}
-                                                    onDragLeave={handleCategoryDragLeave}
-                                                    onDrop={(e) => handleCategoryDrop(e, cat)}
-                                                    onMouseEnter={() => setCatHovered(cat)}
-                                                    onMouseLeave={() => setCatHovered(null)}
-                                                    gap="0"
-                                                >
-                                                    <Text
-                                                        fontSize="sm"
-                                                        fontWeight={selectedCategory === cat ? "bold" : "normal"}
-                                                        color="fg"
-                                                        truncate
-                                                        flex="1"
-                                                    >
-                                                        {cat}
-                                                    </Text>
-                                                    <Menu.Root>
-                                                        <Menu.Trigger asChild>
-                                                            <Box
-                                                                as="button"
-                                                                display={catHovered === cat ? "inline-flex" : "none"}
-                                                                alignItems="center"
-                                                                justifyContent="center"
-                                                                width="20px"
-                                                                height="20px"
-                                                                flexShrink="0"
-                                                                borderRadius="sm"
-                                                                cursor="pointer"
-                                                                _hover={{ bg: { base: "blackAlpha.200", _dark: "whiteAlpha.200" } }}
-                                                                onClick={(e: React.MouseEvent) => e.stopPropagation()}
-                                                                aria-label="Category options"
-                                                                tabIndex={-1}
-                                                            >
-                                                                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                                                                    <circle cx="5" cy="12" r="1.8" />
-                                                                    <circle cx="12" cy="12" r="1.8" />
-                                                                    <circle cx="19" cy="12" r="1.8" />
-                                                                </svg>
-                                                            </Box>
-                                                        </Menu.Trigger>
-                                                        <Menu.Positioner>
-                                                            <Menu.Content minW="120px">
-                                                                <Menu.Item
-                                                                    value="rename"
-                                                                    onClick={(e: React.MouseEvent) => {
-                                                                        e.stopPropagation()
-                                                                        setCatRenameOldType(cat)
-                                                                        setCatRenameNewType(cat)
-                                                                        setCatRenameOpen(true)
-                                                                    }}
-                                                                >
-                                                                    Rename
-                                                                </Menu.Item>
-                                                                <Menu.Item
-                                                                    value="delete"
-                                                                    color="fg.error"
-                                                                    onClick={(e: React.MouseEvent) => {
-                                                                        e.stopPropagation()
-                                                                        setCatDeleteType(cat)
-                                                                        setCatDeleteOpen(true)
-                                                                    }}
-                                                                >
-                                                                    Delete
-                                                                </Menu.Item>
-                                                            </Menu.Content>
-                                                        </Menu.Positioner>
-                                                    </Menu.Root>
-                                                </HStack>
-                                            ))}
-                                            {/* Add category button — opens create dialog */}
-                                            <Box
-                                                px="2"
-                                                py="1"
-                                                cursor="pointer"
-                                                _hover={{ bg: "bg.subtle" }}
-                                                onClick={handleOpenCreateDialog}
-                                                borderRadius="md"
-                                            >
-                                                <HStack gap="1" color="fg.subtle">
-                                                    <PlusIcon />
-                                                    <Text fontSize="xs">Add</Text>
-                                                </HStack>
-                                            </Box>
-                                        </Stack>
+                                        {categoryList}
                                     </Box>
 
-                                    {/* Right: Tags panel */}
-                                    <Box flex="1" minH="300px" maxH="60vh" overflowY="auto">
-                                        {filteredGroups.map((group) => (
-                                            <Box key={group.type ?? "__untagged"} mb="4">
-                                                <Text fontWeight="semibold" fontSize="sm" color="fg" mb="2">
-                                                    {group.type ?? "Uncategorized"}
-                                                </Text>
-                                                <HStack gap="2" flexWrap="wrap">
-                                                    {group.tags.map((t) => {
-                                                        const isSelected = selectedTags.includes(t.value)
-                                                        const groupColor = group.type ? getTypeColor(group.type) : "gray"
-                                                        const colorPalette = isSelected ? "accent" : groupColor
-                                                        return (
-                                                            <Box
-                                                                key={t.value}
-                                                                role="group"
-                                                                display="inline-flex"
-                                                                cursor="pointer"
-                                                                onClick={() => toggleTag(t.value)}
-                                                                draggable
-                                                                onDragStart={(e) => handleTagDragStart(e, t.value, group.type)}
-                                                            >
-                                                                <Tag.Root
-                                                                    size="lg"
-                                                                    colorPalette={colorPalette}
-                                                                    variant={isSelected ? "solid" : "outline"}
-                                                                    borderRadius="full"
-                                                                    display="inline-flex"
-                                                                    alignItems="center"
-                                                                    px="2.5"
-                                                                    py="1"
-                                                                    opacity={group.type ? 0.75 : 1}
-                                                                >
-                                                                    <Tag.Label fontSize="sm">{t.value}</Tag.Label>
-                                                                    <Text as="span" fontSize="xs" color={isSelected ? "white" : "fg.subtle"} ml="1">
-                                                                        ({t.count})
-                                                                    </Text>
-                                                                </Tag.Root>
-                                                            </Box>
-                                                        )
-                                                    })}
-                                                </HStack>
-                                            </Box>
-                                        ))}
-                                        {hasMoreInFiltered && (
-                                            <Button
-                                                variant="ghost"
-                                                size="xs"
-                                                mt="2"
-                                                onClick={handleShowMore}
-                                                loading={loadingMore}
-                                                colorPalette="accent"
-                                            >
-                                                Show more
-                                            </Button>
-                                        )}
-                                        {(!tagData || filteredGroups.length === 0) && (
-                                            <Text color="fg.muted" fontSize="sm">No tags found</Text>
-                                        )}
-                                    </Box>
+                                    {/* Right: Tags panel — memoized, won't re-render on left-panel hover changes */}
+                                    <TagsPanel
+                                        filteredGroups={filteredGroups}
+                                        selectedTags={selectedTags}
+                                        hasMoreInFiltered={hasMoreInFiltered}
+                                        loadingMore={loadingMore}
+                                        isEmpty={!tagData || filteredGroups.length === 0}
+                                        onToggleTag={toggleTag}
+                                        onShowMore={handleShowMore}
+                                        onTagDragStart={handleTagDragStart}
+                                    />
                                 </HStack>
                             </Stack>
                         </Dialog.Body>
                         <Dialog.Footer>
-                            <HStack width="full" justify="space-between">
-                                <Button variant="outline" size="sm" onClick={handleClear} disabled={selectedTags.length === 0}>
-                                    Clear
-                                </Button>
-                                <HStack gap="2">
-                                    {hasChanges && (
-                                        <Button variant="ghost" size="sm" onClick={resetPendingChanges} title="Discard changes" aria-label="Discard pending changes">
-                                            <UndoIcon />
-                                        </Button>
-                                    )}
-                                    <Button
-                                        colorPalette="accent"
-                                        size="sm"
-                                        onClick={hasChanges ? applyPendingChanges : () => setOpen(false)}
-                                        loading={saving}
-                                    >
-                                        {hasChanges ? "Done & Save" : "Done"}
-                                    </Button>
-                                </HStack>
-                            </HStack>
+                            {footer}
                         </Dialog.Footer>
 
                         {/* Create Category Dialog */}
@@ -802,7 +1214,6 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
                                             </Button>
                                             <Button
                                                 colorPalette="accent"
-                                                loading={catRenaming}
                                                 disabled={!catRenameNewType.trim() || catRenameNewType.trim() === catRenameOldType}
                                                 onClick={handleCatRename}
                                             >
@@ -834,7 +1245,6 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave }:
                                             </Button>
                                             <Button
                                                 colorPalette="red"
-                                                loading={catDeleting}
                                                 onClick={handleCatDelete}
                                             >
                                                 Delete

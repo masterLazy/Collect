@@ -6,6 +6,8 @@ interface AssetCardProps {
     asset: AssetDto
     apiBase: string
     onClick: () => void
+    onDragStart?: (e: React.DragEvent) => void
+    onDragEnd?: (e: React.DragEvent) => void
 }
 
 function BrokenImageIcon() {
@@ -18,16 +20,26 @@ function BrokenImageIcon() {
     )
 }
 
-export function AssetCard({ asset, apiBase, onClick }: AssetCardProps) {
+function DragHandleIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="8" cy="8" r="1.5" />
+            <circle cx="16" cy="8" r="1.5" />
+            <circle cx="8" cy="16" r="1.5" />
+            <circle cx="16" cy="16" r="1.5" />
+        </svg>
+    )
+}
+
+export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd }: AssetCardProps) {
     const [loaded, setLoaded] = useState(false)
     const [error, setError] = useState(false)
+    const [hovered, setHovered] = useState(false)
     const isLandscape = asset.width > asset.height
     const aspectRatio = isLandscape ? 4 / 3 : (asset.width && asset.height ? asset.width / asset.height : 4 / 3)
 
     return (
         <Box
-            breakInside="avoid"
-            mb="16px"
             cursor="pointer"
             onClick={onClick}
             borderRadius="md"
@@ -37,6 +49,9 @@ export function AssetCard({ asset, apiBase, onClick }: AssetCardProps) {
             borderColor="border"
             transition="all 0.2s"
             _hover={{ transform: "translateY(-2px)", shadow: "md" }}
+            onMouseEnter={() => setHovered(true)}
+            onMouseLeave={() => setHovered(false)}
+            position="relative"
         >
             <Box
                 position="relative"
@@ -79,10 +94,38 @@ export function AssetCard({ asset, apiBase, onClick }: AssetCardProps) {
                         objectPosition="center"
                         opacity={loaded ? 1 : 0}
                         transition="opacity 0.3s"
+                        draggable={false}
                         onLoad={() => setLoaded(true)}
                         onError={() => { setLoaded(true); setError(true) }}
                     />
                 )}
+            </Box>
+
+            {/* Drag handle — top-right, visible on hover */}
+            <Box
+                position="absolute"
+                top="1.5"
+                right="1.5"
+                width="24px"
+                height="24px"
+                borderRadius="sm"
+                display={hovered ? "flex" : "none"}
+                alignItems="center"
+                justifyContent="center"
+                bg="black/45"
+                color="white"
+                cursor="grab"
+                draggable
+                opacity={hovered ? 1 : 0}
+                transition="opacity 0.15s"
+                _active={{ cursor: "grabbing", bg: "black/65" }}
+                onDragStart={onDragStart}
+                onDragEnd={onDragEnd}
+                onClick={(e) => e.stopPropagation()}
+                title="Drag to move to folder"
+                zIndex="1"
+            >
+                <DragHandleIcon />
             </Box>
         </Box>
     )

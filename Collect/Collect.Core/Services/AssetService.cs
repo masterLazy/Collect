@@ -209,6 +209,34 @@ public partial class AssetService : IAssetService
         return asset;
     }
 
+    /// <summary>
+    /// Strip tag segments from a filename, leaving only non-tag text.
+    /// Uses <see cref="ParseTags"/> to identify which hyphen-separated segments are tags.
+    /// If no non-tag segments remain, generates a name like "Asset_{8-char-guid}".
+    /// </summary>
+    private static string CleanFileName(string fileName)
+    {
+        var ext = Path.GetExtension(fileName);
+        var nameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
+        var segments = nameWithoutExt.Split('-', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .ToList();
+
+        // Only remove segments that explicitly use [Type]Value bracket syntax.
+        // Plain text segments (e.g. "vacation", "photo") are kept — they may be
+        // part of a normal filename, not necessarily tag content.
+        var cleanSegments = segments
+            .Where(s => !TaggedSegmentRegex().IsMatch(s))
+            .ToList();
+
+        var cleanName = cleanSegments.Count > 0
+            ? string.Join("-", cleanSegments)
+            : $"Asset_{Guid.NewGuid().ToString("N")[..8]}";
+
+        return $"{cleanName}{ext}";
+    }
+
     private static void UpdateAssetMetadata(Asset asset, string filePath, string relativePath)
     {
         var fileInfo = new FileInfo(filePath);
@@ -334,8 +362,9 @@ public partial class AssetService : IAssetService
             var libraryPath = _libraryService.GetLibraryPath();
             if (libraryPath is null) return false;
 
-            // Reorder: categorized tags before uncategorized tags
-            tags = ReorderTags(tags);
+            // Reorder: categorized tags before uncategorized tags, using category order if available
+            var categoryOrder = await _libraryService.GetCategoryOrderAsync();
+            tags = ReorderTags(tags, categoryOrder);
 
             var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
             var oldExt = Path.GetExtension(asset.FileName);
@@ -406,10 +435,20 @@ public partial class AssetService : IAssetService
     /// Uncategorized tags maintain their original relative order.
     /// Returns the original list reference if already in order.
     /// </summary>
-    private static List<AssetTag> ReorderTags(List<AssetTag> tags)
+    private static List<AssetTag> ReorderTags(List<AssetTag> tags, List<string>? categoryOrder = null)
     {
+        // Build a lookup for category order indices
+        Dictionary<string, int>? orderIndex = null;
+        if (categoryOrder != null && categoryOrder.Count > 0)
+        {
+            orderIndex = categoryOrder
+                .Select((name, idx) => (name, idx))
+                .ToDictionary(x => x.name, x => x.idx, StringComparer.OrdinalIgnoreCase);
+        }
+
         var categorized = tags.Where(t => t.Type != null)
-            .OrderBy(t => t.Type, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(t => orderIndex != null && orderIndex.TryGetValue(t.Type!, out var idx) ? idx : int.MaxValue)
+            .ThenBy(t => t.Type, StringComparer.OrdinalIgnoreCase)
             .ThenBy(t => t.Value, StringComparer.OrdinalIgnoreCase)
             .ToList();
         var uncategorized = tags.Where(t => t.Type == null).ToList();
@@ -561,7 +600,7 @@ public partial class AssetService : IAssetService
         ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"
     };
 
-    public async Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir)
+    public async Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir, bool importTagsFromFilename = false)
     {
         var libraryPath = _libraryService.GetLibraryPath();
         if (libraryPath is null)
@@ -591,14 +630,16 @@ public partial class AssetService : IAssetService
 
                 try
                 {
-                    // Determine unique file name
-                    var destFileName = file.FileName;
+                    // Always keep original filename; only control whether tags are parsed
+                    var uploadFileName = file.FileName;
+
+                    var destFileName = uploadFileName;
                     var destPath = Path.Combine(targetPath, destFileName);
                     var counter = 1;
 
                     while (File.Exists(destPath))
                     {
-                        var nameWithoutExt = Path.GetFileNameWithoutExtension(file.FileName);
+                        var nameWithoutExt = Path.GetFileNameWithoutExtension(uploadFileName);
                         destFileName = $"{nameWithoutExt}_({counter}){ext}";
                         destPath = Path.Combine(targetPath, destFileName);
                         counter++;
@@ -613,6 +654,12 @@ public partial class AssetService : IAssetService
                     // Create asset entry
                     var relativePath = Path.GetRelativePath(libraryPath, destPath);
                     var asset = CreateAssetFromFile(destPath, relativePath);
+
+                    // Clear tags if not importing from filename
+                    if (!importTagsFromFilename)
+                    {
+                        asset.Tags = new List<AssetTag>();
+                    }
 
                     _assets.Add(asset);
                     result.Added++;
@@ -692,6 +739,55 @@ public partial class AssetService : IAssetService
             asset.FileName = fileName;
 
             return MapToDetailDto(asset);
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    //  Delete Asset
+    // ──────────────────────────────────────────────
+
+    public async Task<bool> DeleteAssetAsync(string id)
+    {
+        await EnsureScannedAsync();
+
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return false;
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            var asset = _assets.FirstOrDefault(a => a.Id == id);
+            if (asset is null) return false;
+
+            var sourcePath = Path.Combine(libraryPath, asset.RelativePath);
+
+            // Delete the thumbnail (best effort)
+            try
+            {
+                _thumbnailService.DeleteThumbnail(libraryPath, sourcePath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete thumbnail for asset {AssetId}: {Path}", id, sourcePath);
+            }
+
+            // Delete the source file from disk
+            if (File.Exists(sourcePath))
+            {
+                File.Delete(sourcePath);
+            }
+
+            // Remove from in-memory list
+            _assets.Remove(asset);
+
+            // Update asset count in library metadata
+            await _libraryService.UpdateAssetCountAsync(_assets.Count);
+
+            return true;
         }
         finally
         {
@@ -1446,6 +1542,25 @@ public partial class AssetService : IAssetService
                 }
             }
 
+            // Update category order in library.json to reflect the rename
+            var categoryOrder = await _libraryService.GetCategoryOrderAsync();
+            if (categoryOrder is not null)
+            {
+                var updated = false;
+                for (int i = 0; i < categoryOrder.Count; i++)
+                {
+                    if (string.Equals(categoryOrder[i], oldType, StringComparison.OrdinalIgnoreCase))
+                    {
+                        categoryOrder[i] = newType;
+                        updated = true;
+                    }
+                }
+                if (updated)
+                {
+                    await _libraryService.SetCategoryOrderAsync(categoryOrder);
+                }
+            }
+
             return anyModified;
         }
         finally
@@ -1507,6 +1622,17 @@ public partial class AssetService : IAssetService
                             asset.RelativePath = newRelativePath;
                         }
                     }
+                }
+            }
+
+            // Clean up category order in library.json to remove the deleted type
+            var categoryOrder = await _libraryService.GetCategoryOrderAsync();
+            if (categoryOrder is not null)
+            {
+                var removed = categoryOrder.RemoveAll(n => string.Equals(n, type, StringComparison.OrdinalIgnoreCase));
+                if (removed > 0)
+                {
+                    await _libraryService.SetCategoryOrderAsync(categoryOrder);
                 }
             }
 

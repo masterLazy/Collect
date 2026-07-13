@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react"
 import { Box, Button, Field, HStack, Input, Stack, Tag, Text } from "@chakra-ui/react"
+import { Tooltip } from "./ui/tooltip"
 import { api } from "../services/api"
 import type { AssetDetailDto, AssetTag } from "../types"
 
@@ -78,6 +79,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [saving, setSaving] = useState(false)
     const [inputFocused, setInputFocused] = useState(false)
+    const [highlightedIndex, setHighlightedIndex] = useState(-1)
     const inputRef = useRef<HTMLInputElement>(null)
     const blurTimerRef = useRef<ReturnType<typeof setTimeout>>()
     const tagDataByValue = useRef<Map<string, string | null>>(new Map())
@@ -107,38 +109,67 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
             tagDataByValue.current = typeMap
 
             if (inputValue.length > 0) {
-                const query = inputValue.toLowerCase()
+                const partialCategory = inputValue.match(/^\[([^\]]*)$/)
+                const completeCategory = inputValue.match(/^\[([^\]]+)\](.*)$/)
 
-                // Collect matching tags with their type info for ranking
-                interface ScoredSuggestion { value: string; score: number }
-                const scored: ScoredSuggestion[] = []
+                if (partialCategory) {
+                    // Case 1: Typing inside brackets [partial → show category suggestions
+                    const partial = partialCategory[1].toLowerCase()
+                    const categorySuggestions = res.groups
+                        .filter(g => g.type !== null && g.type.toLowerCase().includes(partial))
+                        .map(g => `[${g.type}]`)
+                    setSuggestions(categorySuggestions.slice(0, 10))
+                    setShowSuggestions(inputFocused && categorySuggestions.length > 0)
+                } else if (completeCategory) {
+                    // Case 2: Complete category bracket [Type]partial → show value suggestions for that category
+                    const categoryType = completeCategory[1]
+                    const valuePartial = completeCategory[2].toLowerCase()
+                    const group = res.groups.find(g => g.type === categoryType)
+                    if (group) {
+                        const usedVals = new Set(tags.map(t => t.value.toLowerCase()))
+                        const filtered = group.tags
+                            .filter(t => !usedVals.has(t.value.toLowerCase()) && t.value.toLowerCase().includes(valuePartial))
+                            .map(t => t.value)
+                        setSuggestions(filtered.slice(0, 10))
+                        setShowSuggestions(inputFocused && filtered.length > 0)
+                    } else {
+                        setSuggestions([])
+                        setShowSuggestions(false)
+                    }
+                } else {
+                    // Existing logic for regular text search (no bracket)
+                    const query = inputValue.toLowerCase()
 
-                for (const group of res.groups) {
-                    const typeMatch = group.type !== null && group.type.toLowerCase().includes(query)
-                    for (const tag of group.tags) {
-                        if (usedValues.has(tag.value.toLowerCase())) continue
-                        const valueMatch = tag.value.toLowerCase().includes(query)
-                        if (valueMatch || typeMatch) {
-                            // Higher score = better match
-                            // Exact match first, then startsWith, then includes, then type-only match
-                            let score = 0
-                            if (valueMatch) {
-                                const lc = tag.value.toLowerCase()
-                                if (lc === query) score = 100
-                                else if (lc.startsWith(query)) score = 80
-                                else score = 60
-                            } else if (typeMatch) {
-                                // Type-only match: also boost by how many chars of the value match
-                                score = 40
+                    interface ScoredSuggestion { value: string; score: number }
+                    const scored: ScoredSuggestion[] = []
+
+                    for (const group of res.groups) {
+                        const typeMatch = group.type !== null && group.type.toLowerCase().includes(query)
+                        for (const tag of group.tags) {
+                            if (usedValues.has(tag.value.toLowerCase())) continue
+                            const valueMatch = tag.value.toLowerCase().includes(query)
+                            if (valueMatch || typeMatch) {
+                                // Higher score = better match
+                                // Exact match first, then startsWith, then includes, then type-only match
+                                let score = 0
+                                if (valueMatch) {
+                                    const lc = tag.value.toLowerCase()
+                                    if (lc === query) score = 100
+                                    else if (lc.startsWith(query)) score = 80
+                                    else score = 60
+                                } else if (typeMatch) {
+                                    // Type-only match: also boost by how many chars of the value match
+                                    score = 40
+                                }
+                                scored.push({ value: tag.value, score })
                             }
-                            scored.push({ value: tag.value, score })
                         }
                     }
-                }
 
-                scored.sort((a, b) => b.score - a.score)
-                setSuggestions(scored.slice(0, 10).map((s) => s.value))
-                setShowSuggestions(inputFocused && scored.length > 0)
+                    scored.sort((a, b) => b.score - a.score)
+                    setSuggestions(scored.slice(0, 10).map((s) => s.value))
+                    setShowSuggestions(inputFocused && scored.length > 0)
+                }
             } else {
                 // Empty input: distribute suggestions across groups for diversity
                 const MAX_TOTAL = 10
@@ -187,6 +218,15 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
         return () => { cancelled = true }
     }, [inputValue, tags, inputFocused])
 
+    // Reset highlighted index when suggestions change
+    const prevSuggestionsLength = useRef(0)
+    useEffect(() => {
+        if (suggestions.length !== prevSuggestionsLength.current) {
+            setHighlightedIndex(-1)
+            prevSuggestionsLength.current = suggestions.length
+        }
+    }, [suggestions])
+
     const handleFocus = () => {
         if (blurTimerRef.current) clearTimeout(blurTimerRef.current)
         setInputFocused(true)
@@ -202,13 +242,13 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
         if (!trimmed) return
 
         // Try to parse [Type]Value bracket syntax first
-        const bracketMatch = trimmed.match(/^\[(?<type>[^\]]+)\](?<value>.+)$/)
+        const bracketMatch = trimmed.match(/^\[([^\]]+)\](.+)$/)
         let extractedValue: string
         let extractedType: string | null
 
         if (bracketMatch) {
-            extractedType = bracketMatch.groups!.type
-            extractedValue = bracketMatch.groups!.value.trim()
+            extractedType = bracketMatch[1]
+            extractedValue = bracketMatch[2].trim()
         } else {
             extractedValue = trimmed
             // Look up type from API data (preserve type when adding via suggestion)
@@ -262,11 +302,51 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
     }
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key === "Enter") {
+        if (!showSuggestions || suggestions.length === 0) {
+            if (e.key === "Enter") {
+                e.preventDefault()
+                handleAddTag(inputValue)
+            }
+            return
+        }
+
+        if (e.key === "ArrowDown") {
             e.preventDefault()
-            handleAddTag(inputValue)
+            setHighlightedIndex((prev) =>
+                prev < suggestions.length - 1 ? prev + 1 : 0
+            )
+        } else if (e.key === "ArrowUp") {
+            e.preventDefault()
+            setHighlightedIndex((prev) =>
+                prev > 0 ? prev - 1 : suggestions.length - 1
+            )
+        } else if (e.key === "Enter") {
+            e.preventDefault()
+            if (highlightedIndex >= 0 && highlightedIndex < suggestions.length) {
+                const s = suggestions[highlightedIndex]
+                if (s.startsWith('[') && s.endsWith(']')) {
+                    setInputValue(s)
+                    inputRef.current?.focus()
+                } else {
+                    handleAddTag(s)
+                }
+            } else {
+                handleAddTag(inputValue)
+            }
+        } else if (e.key === "Escape") {
+            setShowSuggestions(false)
         }
     }
+
+    // Load category order for sorting
+    const [categoryOrder, setCategoryOrder] = useState<string[]>([])
+    useEffect(() => {
+        api.getLibraryInfo().then((info) => {
+            if (info.categoryOrder) {
+                setCategoryOrder(info.categoryOrder)
+            }
+        }).catch(() => { })
+    }, [])
 
     return (
         <Stack gap="3" position="relative">
@@ -309,8 +389,14 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
 
             <HStack gap="2" flexWrap="wrap">
                 {[...tags].sort((a, b) => {
-                    // Categorized tags first, sorted by type name
-                    if (a.type && b.type) return a.type.localeCompare(b.type)
+                    // Categorized tags first, sorted by category order, then by type name
+                    if (a.type && b.type) {
+                        const orderIdx = new Map(categoryOrder.map((name, idx) => [name, idx]))
+                        const ai = orderIdx.get(a.type) ?? Number.MAX_SAFE_INTEGER
+                        const bi = orderIdx.get(b.type) ?? Number.MAX_SAFE_INTEGER
+                        if (ai !== bi) return ai - bi
+                        return a.type.localeCompare(b.type)
+                    }
                     if (a.type && !b.type) return -1
                     if (!a.type && b.type) return 1
                     return 0
@@ -325,32 +411,46 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                             position="relative"
                             cursor="default"
                         >
-                            <Tag.Root
-                                size="lg"
-                                colorPalette={colorPalette}
-                                variant={isInFilter ? "outline" : "subtle"}
-                                borderRadius="full"
-                                display="inline-flex"
-                                alignItems="center"
-                                px="2.5"
-                                py="1"
-                                opacity={tag.type ? 0.75 : 1}
-                                cursor={onTagClick && !isInFilter ? "pointer" : "default"}
-                                onClick={onTagClick && !isInFilter ? () => onTagClick(tag.value) : undefined}
-                            >
-                                {tag.type && (
-                                    <Box
-                                        as="span"
-                                        color={colorPalette + ".500"}
-                                        fontSize="sm"
-                                        fontWeight="medium"
-                                        display="inline"
+                            {tag.type ? (
+                                <Tooltip
+                                    content={tag.type}
+                                    positioning={{ placement: "top", gutter: 4 }}
+                                    closeOnPointerDown={false}
+                                    lazyMount
+                                >
+                                    <Tag.Root
+                                        size="lg"
+                                        colorPalette={colorPalette}
+                                        variant={isInFilter ? "solid" : "subtle"}
+                                        borderRadius="full"
+                                        display="inline-flex"
+                                        alignItems="center"
+                                        px="2.5"
+                                        py="1"
+                                        cursor={onTagClick ? "pointer" : "default"}
+                                        onClick={onTagClick ? () => onTagClick(tag.value) : undefined}
+                                        opacity={tag.type ? 0.85 : 1}
                                     >
-                                        {tag.type}&nbsp;
-                                    </Box>
-                                )}
-                                <Tag.Label fontSize="sm">{tag.value}</Tag.Label>
-                            </Tag.Root>
+                                        <Tag.Label fontSize="sm">{tag.value}</Tag.Label>
+                                    </Tag.Root>
+                                </Tooltip>
+                            ) : (
+                                <Tag.Root
+                                    size="lg"
+                                    colorPalette="accent"
+                                    variant={isInFilter ? "solid" : "subtle"}
+                                    borderRadius="full"
+                                    display="inline-flex"
+                                    alignItems="center"
+                                    px="2.5"
+                                    py="1"
+                                    cursor={onTagClick ? "pointer" : "default"}
+                                    onClick={onTagClick ? () => onTagClick(tag.value) : undefined}
+                                    opacity={0.85}
+                                >
+                                    <Tag.Label fontSize="sm">{tag.value}</Tag.Label>
+                                </Tag.Root>
+                            )}
                             <Box
                                 as="button"
                                 onClick={() => handleRemoveTag(tag.value, tag.type)}
@@ -427,14 +527,23 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                     width="full"
                     top="100%"
                 >
-                    {suggestions.map((s) => (
+                    {suggestions.map((s, i) => (
                         <Box
                             key={s}
                             px="3"
                             py="2"
                             cursor="pointer"
-                            _hover={{ bg: "bg.subtle" }}
-                            onClick={() => handleAddTag(s)}
+                            bg={i === highlightedIndex ? { base: "blue.100", _dark: "blue.800" } : undefined}
+                            _hover={{ bg: { base: "blue.100", _dark: "blue.800" } }}
+                            onClick={() => {
+                                if (s.startsWith('[') && s.endsWith(']')) {
+                                    // Category suggestion from bracket mode — keep typing
+                                    setInputValue(s)
+                                    inputRef.current?.focus()
+                                } else {
+                                    handleAddTag(s)
+                                }
+                            }}
                             fontSize="sm"
                         >
                             {s}

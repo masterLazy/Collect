@@ -66,6 +66,16 @@ public interface ILibraryService
     Task UpdateAssetCountAsync(int count);
 
     /// <summary>
+    /// Get the custom display order for tag categories, or null if not set.
+    /// </summary>
+    Task<List<string>?> GetCategoryOrderAsync();
+
+    /// <summary>
+    /// Set the custom display order for tag categories.
+    /// </summary>
+    Task SetCategoryOrderAsync(List<string> order);
+
+    /// <summary>
     /// Get all registered libraries from the persistent registry.
     /// </summary>
     Task<List<LibraryInfo>> GetLibrariesAsync();

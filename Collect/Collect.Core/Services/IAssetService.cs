@@ -58,7 +58,7 @@ public interface IAssetService
     /// <summary>
     /// Upload asset files to the library.
     /// </summary>
-    Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir);
+    Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir, bool importTagsFromFilename = false);
 
     /// <summary>
     /// Get an asset's image decoded and re-encoded as a PNG byte array, resized so the
@@ -72,6 +72,11 @@ public interface IAssetService
     /// Returns the updated AssetDetailDto, or null if the asset was not found.
     /// </summary>
     Task<AssetDetailDto?> MoveAssetAsync(string id, string targetFolder);
+
+    /// <summary>
+    /// Delete an asset: remove from in-memory list and delete the file from disk.
+    /// </summary>
+    Task<bool> DeleteAssetAsync(string id);
 
     /// <summary>
     /// Get current tag conflicts (values with multiple different type prefixes across assets).

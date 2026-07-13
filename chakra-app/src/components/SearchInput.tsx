@@ -58,6 +58,7 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
     const [suggestions, setSuggestions] = useState<{ value: string; type: string | null }[]>([])
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [inputFocused, setInputFocused] = useState(false)
+    const [highlightedIndex, setHighlightedIndex] = useState(-1)
     const timerRef = useRef<ReturnType<typeof setTimeout>>()
     const blurTimerRef = useRef<ReturnType<typeof setTimeout>>()
     const inputRef = useRef<HTMLInputElement>(null)
@@ -88,61 +89,159 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
         }
     }, [])
 
-    // Fetch autocomplete suggestions when typing in tags: context
+    // Fetch autocomplete suggestions
     useEffect(() => {
         let cancelled = false
 
+        // Determine the current tag segment being typed
         const parsed = parseTagsPrefix(localValue)
+        const isTagsMode = parsed !== null
+        const currentSegment = parsed ? getCurrentTagPrefix(parsed.suffix) : localValue
+        const selectedValues = parsed ? getSelectedTagValues(parsed.suffix) : []
+
+        // Check if current segment is in bracket mode: [Cat] or [Cat]val
+        const partialCategory = currentSegment.match(/^\[([^\]]*)$/)
+        const completeCategory = currentSegment.match(/^\[([^\]]+)\](.*)$/)
+
+        if (partialCategory || completeCategory || localValue.startsWith('[')) {
+            // Bracket autocomplete
+            const bracketText = localValue.startsWith('[') ? localValue : currentSegment
+            const bracketPartial = bracketText.match(/^\[([^\]]*)$/)
+            const bracketComplete = bracketText.match(/^\[([^\]]+)\](.*)$/)
+
+            if (bracketPartial) {
+                api.getTags(1, 9999).then((res) => {
+                    if (cancelled) return
+                    const partial = bracketPartial![1].toLowerCase()
+                    const cats = res.groups
+                        .filter(g => g.type !== null && g.type.toLowerCase().includes(partial))
+                        .map(g => `[${g.type}]`)
+                    setSuggestions(cats.slice(0, 10).map(v => ({ value: v, type: null })))
+                    setShowSuggestions(inputFocused && cats.length > 0)
+                    setHighlightedIndex(-1)
+                }).catch(() => { })
+            } else if (bracketComplete) {
+                api.getTags(1, 9999).then((res) => {
+                    if (cancelled) return
+                    const categoryType = bracketComplete![1]
+                    const valuePartial = bracketComplete![2].toLowerCase()
+                    const group = res.groups.find(g => g.type === categoryType)
+                    if (group) {
+                        const filtered = group.tags
+                            .filter(t => t.value.toLowerCase().includes(valuePartial))
+                            .map(t => ({ value: t.value, type: group.type }))
+                        setSuggestions(filtered.slice(0, 10))
+                        setShowSuggestions(inputFocused && filtered.length > 0)
+                    } else {
+                        setSuggestions([])
+                        setShowSuggestions(false)
+                    }
+                    setHighlightedIndex(-1)
+                }).catch(() => { })
+            }
+            return () => { cancelled = true }
+        }
+
         if (!parsed) {
             setShowSuggestions(false)
             setSuggestions([])
             return
         }
 
-        const currentPrefix = getCurrentTagPrefix(parsed.suffix)
-        if (!currentPrefix) {
-            setShowSuggestions(false)
-            setSuggestions([])
-            return
-        }
-
-        const selectedValues = getSelectedTagValues(parsed.suffix)
-
         api.getTags(1, 9999).then((res) => {
             if (cancelled) return
 
-            const query = currentPrefix.toLowerCase()
-            const matching: { value: string; type: string | null }[] = []
+            const query = currentSegment.toLowerCase()
+            let matching: { value: string; type: string | null }[] = []
 
-            for (const group of res.groups) {
-                for (const tag of group.tags) {
-                    if (selectedValues.includes(tag.value)) continue
-                    if (tag.value.toLowerCase().includes(query)) {
-                        matching.push({ value: tag.value, type: group.type })
+            if (!query) {
+                // After + with empty prefix — show diverse available tags
+                const MAX_TOTAL = 10
+                const PER_GROUP = 3
+                const usedSet = new Set(selectedValues.map(v => v.toLowerCase()))
+                const result: { value: string; type: string | null }[] = []
+                const leftovers: { value: string; type: string | null; groupIndex: number }[] = []
+
+                res.groups.forEach((group, gi) => {
+                    const available = group.tags
+                        .filter(t => !usedSet.has(t.value.toLowerCase()))
+                        .map(t => ({ value: t.value, type: group.type }))
+                    result.push(...available.slice(0, PER_GROUP))
+                    available.slice(PER_GROUP).forEach(t => leftovers.push({ ...t, groupIndex: gi }))
+                })
+
+                if (result.length < MAX_TOTAL && leftovers.length > 0) {
+                    const byGroup = new Map<number, typeof leftovers>()
+                    for (const entry of leftovers) {
+                        const list = byGroup.get(entry.groupIndex) ?? []
+                        list.push(entry)
+                        byGroup.set(entry.groupIndex, list)
+                    }
+                    const groupIds = Array.from(byGroup.keys())
+                    let idx = 0
+                    while (result.length < MAX_TOTAL) {
+                        const gid = groupIds[idx % groupIds.length]
+                        const remaining = byGroup.get(gid)!
+                        if (remaining.length > 0) result.push(remaining.shift()!)
+                        idx++
+                        if (Array.from(byGroup.values()).every(arr => arr.length === 0)) break
                     }
                 }
-            }
 
-            // Sort: exact match first, then startsWith, then includes
-            matching.sort((a, b) => {
-                const la = a.value.toLowerCase()
-                const lb = b.value.toLowerCase()
-                if (la === query) return -1
-                if (lb === query) return 1
-                if (la.startsWith(query) && !lb.startsWith(query)) return -1
-                if (!la.startsWith(query) && lb.startsWith(query)) return 1
-                return 0
-            })
+                matching = result.slice(0, MAX_TOTAL)
+            } else {
+                // Normal tag value search
+                for (const group of res.groups) {
+                    for (const tag of group.tags) {
+                        if (selectedValues.includes(tag.value)) continue
+                        if (tag.value.toLowerCase().includes(query)) {
+                            matching.push({ value: tag.value, type: group.type })
+                        }
+                    }
+                }
+
+                matching.sort((a, b) => {
+                    const la = a.value.toLowerCase()
+                    const lb = b.value.toLowerCase()
+                    if (la === query) return -1
+                    if (lb === query) return 1
+                    if (la.startsWith(query) && !lb.startsWith(query)) return -1
+                    if (!la.startsWith(query) && lb.startsWith(query)) return 1
+                    return 0
+                })
+            }
 
             setSuggestions(matching.slice(0, 10))
             setShowSuggestions(inputFocused && matching.length > 0)
+            setHighlightedIndex(-1)
         }).catch(() => { })
 
         return () => { cancelled = true }
     }, [localValue, inputFocused])
 
     const handleSuggestionClick = (suggestionValue: string) => {
-        const newValue = replaceLastSegment(localValue, suggestionValue)
+        const parsed = parseTagsPrefix(localValue)
+        let newValue: string
+
+        if (parsed) {
+            // tags: mode — replace last segment
+            newValue = replaceLastSegment(localValue, suggestionValue)
+        } else if (localValue.startsWith('[')) {
+            // Bare bracket mode — build bracket expression
+            const bracketPartial = localValue.match(/^\[([^\]]*)$/)
+            if (bracketPartial && suggestionValue.startsWith('[') && suggestionValue.endsWith(']')) {
+                // Category suggestion — set input so user can continue typing
+                newValue = suggestionValue
+            } else if (localValue.includes(']')) {
+                // Already have complete category — append value after ]
+                newValue = localValue + suggestionValue
+            } else {
+                newValue = suggestionValue
+            }
+        } else {
+            newValue = suggestionValue
+        }
+
         setLocalValue(newValue)
         onChange(newValue)
         setShowSuggestions(false)
@@ -158,11 +257,39 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
         blurTimerRef.current = setTimeout(() => setInputFocused(false), 150)
     }
 
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (!showSuggestions || suggestions.length === 0) {
+            if (e.key === "Enter") {
+                // Let normal Enter behavior pass through when no suggestions
+            }
+            return
+        }
+
+        if (e.key === "ArrowDown") {
+            e.preventDefault()
+            setHighlightedIndex((prev) =>
+                prev < suggestions.length - 1 ? prev + 1 : 0
+            )
+        } else if (e.key === "ArrowUp") {
+            e.preventDefault()
+            setHighlightedIndex((prev) =>
+                prev > 0 ? prev - 1 : suggestions.length - 1
+            )
+        } else if (e.key === "Enter") {
+            e.preventDefault()
+            if (highlightedIndex >= 0 && highlightedIndex < suggestions.length) {
+                handleSuggestionClick(suggestions[highlightedIndex].value)
+            }
+        } else if (e.key === "Escape") {
+            setShowSuggestions(false)
+        }
+    }
+
     const parsed = parseTagsPrefix(localValue)
     const showClearButton = localValue.length > 0
 
     return (
-        <Stack gap="0" width="full" maxW="400px" position="relative">
+        <Stack gap="0" width="full" maxW={{ base: "full", md: "400px" }} position="relative">
             <Stack
                 position="absolute"
                 left="3"
@@ -176,11 +303,12 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
             </Stack>
             <Input
                 ref={inputRef}
-                placeholder="Search files or tags:tag1+tag2"
+                placeholder="Search filename or tag"
                 value={localValue}
                 onChange={handleChange}
                 onFocus={handleFocus}
                 onBlur={handleBlur}
+                onKeyDown={handleKeyDown}
                 bg="bg"
                 border="1px solid"
                 borderColor="border"
@@ -204,7 +332,7 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
                     <XIcon />
                 </Box>
             )}
-            {showSuggestions && parsed && (
+            {showSuggestions && (
                 <Box
                     position="absolute"
                     zIndex="dropdown"
@@ -219,13 +347,14 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
                     width="full"
                     top="100%"
                 >
-                    {suggestions.map((s) => (
+                    {suggestions.map((s, i) => (
                         <Box
                             key={s.value}
                             px="3"
                             py="2"
                             cursor="pointer"
-                            _hover={{ bg: "bg.subtle" }}
+                            bg={i === highlightedIndex ? { base: "blue.100", _dark: "blue.800" } : undefined}
+                            _hover={{ bg: { base: "blue.100", _dark: "blue.800" } }}
                             onClick={() => handleSuggestionClick(s.value)}
                             fontSize="sm"
                         >

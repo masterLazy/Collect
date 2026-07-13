@@ -468,6 +468,37 @@ public class LibraryService : ILibraryService
         await RegisterLibraryAsync(info);
     }
 
+    public async Task<List<string>?> GetCategoryOrderAsync()
+    {
+        var infoPath = GetInfoPath();
+        if (infoPath is null) return null;
+
+        if (!File.Exists(infoPath))
+            return null;
+
+        var json = await File.ReadAllTextAsync(infoPath);
+        var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+        return info?.CategoryOrder;
+    }
+
+    public async Task SetCategoryOrderAsync(List<string> order)
+    {
+        var infoPath = GetInfoPath();
+        if (infoPath is null)
+            throw new InvalidOperationException("Library not initialized.");
+
+        if (!File.Exists(infoPath))
+            throw new InvalidOperationException("Library metadata file not found.");
+
+        var json = await File.ReadAllTextAsync(infoPath);
+        var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+        if (info is null)
+            throw new InvalidOperationException("Failed to read library metadata.");
+
+        info.CategoryOrder = order;
+        await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+    }
+
     private string? GetInfoPath()
     {
         if (_libraryPath is null) return null;

@@ -10,6 +10,7 @@ import {
 import { Provider } from "./components/ui/provider"
 import { LibraryManager } from "./components/LibraryManager"
 import { LibraryPage } from "./components/LibraryPage"
+import { ImageViewerPage } from "./components/ImageViewerPage"
 import { useCustomToaster, ToastContainer, CustomToaster } from "./components/CustomToast"
 import { api } from "./services/api"
 
@@ -127,7 +128,9 @@ export function App() {
     <Provider>
       <Routes>
         <Route path="/" element={<HomePage />} />
-        <Route path="/:libraryId/*" element={<LibraryPage />} />
+        <Route path="/:libraryId/view/:assetId" element={<ImageViewerPage />} />
+        <Route path="/:libraryId/root/*" element={<LibraryPage />} />
+        <Route path="/:libraryId" element={<LibraryPage />} />
       </Routes>
     </Provider>
   )

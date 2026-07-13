@@ -50,6 +50,7 @@ export interface LibraryInfo {
     name: string;
     path: string;
     assetCount: number;
+    categoryOrder?: string[];
 }
 
 export interface DirectoryNode {

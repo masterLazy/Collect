@@ -124,6 +124,18 @@ public class LibraryController : ControllerBase
     }
 
     /// <summary>
+    /// POST /api/library/category-order
+    /// Save the display order of tag categories.
+    /// Body: { "order": ["画师", "人物", "作品", ...] }
+    /// </summary>
+    [HttpPost("category-order")]
+    public async Task<IActionResult> SetCategoryOrder([FromBody] CategoryOrderRequest request)
+    {
+        await _libraryService.SetCategoryOrderAsync(request.Order);
+        return Ok(new { success = true });
+    }
+
+    /// <summary>
     /// GET /api/library/recent
     /// Get the list of recent libraries from persistent storage.
     /// </summary>
@@ -203,4 +215,9 @@ public class RenameDirectoryRequest
 public class DeleteDirectoryRequest
 {
     public string RelativePath { get; set; } = "";
+}
+
+public class CategoryOrderRequest
+{
+    public List<string> Order { get; set; } = new();
 }
