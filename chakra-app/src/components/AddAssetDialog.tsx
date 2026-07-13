@@ -124,7 +124,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
     const [folderDialogOpen, setFolderDialogOpen] = useState(false)
     const [creatingSubfolder, setCreatingSubfolder] = useState(false)
     const [newFolderName, setNewFolderName] = useState("")
-    const [importTags, setImportTags] = useState(false)
+    const [keepFilename, setKeepFilename] = useState(false)
     const fileInputRef = useRef<HTMLInputElement>(null)
 
     useEffect(() => {
@@ -137,7 +137,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
             setFolderDialogOpen(false)
             setCreatingSubfolder(false)
             setNewFolderName("")
-            setImportTags(false)
+            setKeepFilename(false)
         }
     }, [open])
 
@@ -208,7 +208,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
 
         setUploading(true)
         try {
-            const result: UploadResult = await api.uploadAssets(readyFiles, targetDir, importTags)
+            const result: UploadResult = await api.uploadAssets(readyFiles, targetDir, keepFilename)
             toaster.create({
                 title: "Upload complete",
                 description: result.added + " file(s) added" + (result.errors.length > 0 ? ", " + result.errors.length + " error(s)" : ""),
@@ -357,15 +357,15 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
                 </HStack>
             )}
 
-            {/* Import tags from filename checkbox */}
+            {/* Keep filename checkbox */}
             <Checkbox.Root
-                checked={importTags}
-                onCheckedChange={(e: { checked: boolean }) => setImportTags(!!e.checked)}
+                checked={keepFilename}
+                onCheckedChange={(e: { checked: boolean }) => setKeepFilename(!!e.checked)}
             >
                 <Checkbox.HiddenInput />
                 <Checkbox.Control />
                 <Checkbox.Label color="fg" fontSize="sm">
-                    Import tags from filename
+                    Keep filename
                 </Checkbox.Label>
             </Checkbox.Root>
 

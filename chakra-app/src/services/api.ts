@@ -48,11 +48,11 @@ export const api = {
         post<{ path: string }>("/api/library/rename-directory", { relativePath, newName }),
     deleteDirectory: (relativePath: string) =>
         post<{ success: boolean }>("/api/library/delete-directory", { relativePath }),
-    uploadAssets: async (files: File[], targetDir: string, importTagsFromFilename?: boolean) => {
+    uploadAssets: async (files: File[], targetDir: string, keepFilename?: boolean) => {
         const formData = new FormData()
         files.forEach((f) => formData.append("files", f))
         formData.append("targetDir", targetDir)
-        formData.append("importTagsFromFilename", String(importTagsFromFilename ?? false))
+        formData.append("keepFilename", String(keepFilename ?? false))
         const res = await fetch(API_BASE + "/api/assets/upload", {
             method: "POST",
             body: formData,

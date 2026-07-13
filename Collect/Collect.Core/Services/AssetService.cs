@@ -600,7 +600,7 @@ public partial class AssetService : IAssetService
         ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"
     };
 
-    public async Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir, bool importTagsFromFilename = false)
+    public async Task<UploadResult> UploadAssetsAsync(List<IFormFile> files, string targetDir, bool keepFilename = false)
     {
         var libraryPath = _libraryService.GetLibraryPath();
         if (libraryPath is null)
@@ -630,8 +630,18 @@ public partial class AssetService : IAssetService
 
                 try
                 {
-                    // Always keep original filename; only control whether tags are parsed
-                    var uploadFileName = file.FileName;
+                    string uploadFileName;
+
+                    if (keepFilename)
+                    {
+                        // Keep original filename
+                        uploadFileName = file.FileName;
+                    }
+                    else
+                    {
+                        // Clear filename — use only extension, e.g. ".jpg"
+                        uploadFileName = ext;
+                    }
 
                     var destFileName = uploadFileName;
                     var destPath = Path.Combine(targetPath, destFileName);
@@ -639,8 +649,16 @@ public partial class AssetService : IAssetService
 
                     while (File.Exists(destPath))
                     {
-                        var nameWithoutExt = Path.GetFileNameWithoutExtension(uploadFileName);
-                        destFileName = $"{nameWithoutExt}_({counter}){ext}";
+                        if (keepFilename)
+                        {
+                            var nameWithoutExt = Path.GetFileNameWithoutExtension(uploadFileName);
+                            destFileName = $"{nameWithoutExt}-{counter:D2}{ext}";
+                        }
+                        else
+                        {
+                            // e.g. "-1.jpg", "-2.jpg"
+                            destFileName = $"-{counter:D2}{ext}";
+                        }
                         destPath = Path.Combine(targetPath, destFileName);
                         counter++;
                     }
@@ -654,12 +672,6 @@ public partial class AssetService : IAssetService
                     // Create asset entry
                     var relativePath = Path.GetRelativePath(libraryPath, destPath);
                     var asset = CreateAssetFromFile(destPath, relativePath);
-
-                    // Clear tags if not importing from filename
-                    if (!importTagsFromFilename)
-                    {
-                        asset.Tags = new List<AssetTag>();
-                    }
 
                     _assets.Add(asset);
                     result.Added++;
@@ -716,12 +728,20 @@ public partial class AssetService : IAssetService
             var fileName = Path.GetFileName(asset.RelativePath);
 
             // Determine new path
+            var ext = Path.GetExtension(fileName);
+            var nameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
             var newRelativePath = string.IsNullOrEmpty(targetDir) ? fileName : targetDir.Replace('/', Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar + fileName;
             var newFilePath = Path.Combine(libraryPath, newRelativePath);
 
-            // Handle name collision
-            if (File.Exists(newFilePath))
-                return null;
+            // Handle name collision — use -1, -2, ... suffix
+            var counter = 1;
+            while (File.Exists(newFilePath))
+            {
+                var newFileName = $"{nameWithoutExt}-{counter:D2}{ext}";
+                newRelativePath = string.IsNullOrEmpty(targetDir) ? newFileName : targetDir.Replace('/', Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar + newFileName;
+                newFilePath = Path.Combine(libraryPath, newRelativePath);
+                counter++;
+            }
 
             // Ensure target directory exists
             var targetFullDir = Path.GetDirectoryName(newFilePath)!;
@@ -735,8 +755,9 @@ public partial class AssetService : IAssetService
             File.Move(oldFilePath, newFilePath);
 
             // Update asset metadata (under lock so ScanAsync doesn't interfere)
+            var finalFileName = Path.GetFileName(newRelativePath);
             asset.RelativePath = newRelativePath;
-            asset.FileName = fileName;
+            asset.FileName = finalFileName;
 
             return MapToDetailDto(asset);
         }

@@ -191,19 +191,20 @@ public class AssetsController : ControllerBase
 
     /// <summary>
     /// POST /api/assets/upload
-    /// Upload asset files (multipart form-data). Tags are always parsed from filenames.
+    /// Upload asset files (multipart form-data).
+    /// If keepFilename is true, original filename is preserved; otherwise only the extension is used.
     /// </summary>
     [HttpPost("upload")]
     [RequestSizeLimit(200 * 1024 * 1024)] // 200MB
     public async Task<IActionResult> Upload(
         [FromForm] List<IFormFile> files,
         [FromForm] string targetDir,
-        [FromForm] bool importTagsFromFilename = false)
+        [FromForm] bool keepFilename = false)
     {
         if (files is null || files.Count == 0)
             return BadRequest(new { error = "No files provided." });
 
-        var result = await _assetService.UploadAssetsAsync(files, targetDir, importTagsFromFilename);
+        var result = await _assetService.UploadAssetsAsync(files, targetDir, keepFilename);
         return Ok(result);
     }
 
