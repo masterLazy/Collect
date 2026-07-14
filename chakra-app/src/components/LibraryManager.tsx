@@ -16,6 +16,7 @@ import {
     VStack,
 } from "@chakra-ui/react"
 import type { CustomToaster } from "./CustomToast"
+import { useDocumentTitle } from "../hooks/useDocumentTitle"
 import { api } from "../services/api"
 import { ServerPathPicker } from "./ServerPathPicker"
 import type { LibraryInfo } from "../types"
@@ -84,6 +85,9 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
     const [encryptLibrary, setEncryptLibrary] = useState(false)
     const [password, setPassword] = useState("")
     const [confirmPassword, setConfirmPassword] = useState("")
+
+    // Page title
+    useDocumentTitle("Library Manager · Collect")
 
     const fetchLibraries = () => {
         api.getLibraries()
@@ -199,11 +203,14 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
             <Center height="100vh" bg="bg">
                 <VStack gap="6" width="full" maxW="960px" px="4">
                     <Box textAlign="center">
-                        <Text fontSize="3xl" fontWeight="bold" color="fg">
-                            Collect
-                        </Text>
+                        <Box display="flex" alignItems="center" justifyContent="center" gap="3">
+                            <img src="/icon.svg" alt="Collect" style={{ width: 40, height: 40 }} />
+                            <Text fontSize="3xl" fontWeight="bold" color="fg">
+                                Collect
+                            </Text>
+                        </Box>
                         <Text color="fg.muted" fontSize="sm" mt="1">
-                            Library Manager
+                            Multimedia Asset Manager
                         </Text>
                     </Box>
 

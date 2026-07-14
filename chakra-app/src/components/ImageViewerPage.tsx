@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { Box, Button, Center, HStack, IconButton, Image, Spinner, Text, VStack } from "@chakra-ui/react"
-import { api } from "../services/api"
+import { useDocumentTitle } from "../hooks/useDocumentTitle"
+import { api, API_BASE } from "../services/api"
 import type { AssetDetailDto } from "../types"
-
-const API_BASE = `http://${window.location.hostname}:5000`
 
 // Zoom levels (multiplier relative to fit-to-screen size)
 const ZOOM_LEVELS = [0, 1, 1.5, 2, 3, 4]
@@ -53,6 +52,9 @@ export function ImageViewerPage() {
     const containerRef = useRef<HTMLDivElement>(null)
 
     const isZoomed = zoomLevel > 0
+
+    // Page title — uses asset fileName once loaded
+    useDocumentTitle(asset ? `${asset.fileName} · Collect` : "Collect")
 
     useEffect(() => {
         if (!assetId) {

@@ -26,8 +26,9 @@ public class ErrorHandlingMiddleware
         }
         catch (Exception ex)
         {
+            var path = context.Request.Path.Value ?? "";
             _logger.LogError(ex, "Unhandled exception occurred while processing request: {Method} {Path}",
-                context.Request.Method, context.Request.Path);
+                context.Request.Method, path);
 
             context.Response.ContentType = "application/json";
             context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;

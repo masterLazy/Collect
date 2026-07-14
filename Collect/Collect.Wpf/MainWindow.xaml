@@ -4,9 +4,91 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:Collect.Wpf"
+        xmlns:lazy="clr-namespace:LazyWpf;assembly=LazyWpf"
         mc:Ignorable="d"
-        Title="MainWindow" Height="450" Width="800">
-    <Grid>
+        Title="Collect 1.0.0.beta.1"
+        Height="550" Width="850" WindowStartupLocation="CenterScreen" Closing="Window_Closing">
+    <DockPanel Margin="12">
+        <!-- Row 0: Toolbar -->
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" DockPanel.Dock="Top">
+            <StackPanel.Resources>
+                <Style TargetType="lazy:Button">
+                    <Setter Property="Height" Value="40"/>
+                </Style>
+            </StackPanel.Resources>
+            <lazy:Button Icon="&#xE768;" Text="Launch" x:Name="BtnLaunch" Click="BtnLaunch_Click" IsAccented="True"/>
+            <lazy:Button Icon="&#xE71A;" Text="Stop" x:Name="BtnStop" Click="BtnStop_Click" Margin="8 0 0 0" IsEnabled="False"/>
+            <Separator Width="8" Margin="8 0" Background="Transparent"/>
+            <lazy:Button Icon="&#xE774;" Text="Open in Browser" x:Name="BtnOpen" Click="BtnOpen_Click" Margin="0 0 0 0" IsEnabled="False"/>
+            <Separator Width="8" Margin="8 0" Background="Transparent"/>
+            <ComboBox x:Name="LogFilter" SelectedIndex="0" Width="100">
+                <ComboBoxItem>All</ComboBoxItem>
+                <ComboBoxItem>Backend</ComboBoxItem>
+                <ComboBoxItem>Frontend</ComboBoxItem>
+            </ComboBox>
+            <lazy:Button Icon="&#xE777;" Text="Clear" x:Name="BtnClear" Click="BtnClear_Click" Margin="8 0 0 0"/>
+        </StackPanel>
 
-    </Grid>
+        <!-- Row 1: Status bar -->
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0 6 0 0" DockPanel.Dock="Top">
+            <StackPanel Orientation="Horizontal" Width="80" Margin="5 0">
+                <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="#666666" VerticalAlignment="Center"/>
+                <TextBlock x:Name="TxtStatus" Text="Stopped" VerticalAlignment="Center" FontSize="13" FontWeight="SemiBold" Margin="6 0 0 0"/>
+            </StackPanel>
+            <TextBox x:Name="TxtUrl" Text="" VerticalAlignment="Center" Width="280" Margin="16 0 0 0" IsReadOnly="True"/>
+        </StackPanel>
+
+        <!-- Row 2: Log viewer -->
+        <ListBox Grid.Row="2" x:Name="LogList" Margin="0 6 0 0"
+                 BorderThickness="1" BorderBrush="#E0E0E0"
+                 VirtualizingPanel.ScrollUnit="Pixel"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                 AlternationCount="2">
+            <ListBox.ItemContainerStyle>
+                <Style TargetType="ListBoxItem">
+                    <Setter Property="Padding" Value="4 0"/>
+                    <Setter Property="BorderThickness" Value="0 0 0 1"/>
+                    <Setter Property="BorderBrush" Value="#F0F0F0"/>
+                    <Style.Triggers>
+                        <Trigger Property="ItemsControl.AlternationIndex" Value="1">
+                            <Setter Property="Background" Value="#F5F5F5"/>
+                        </Trigger>
+                        <Trigger Property="ItemsControl.AlternationIndex" Value="0">
+                            <Setter Property="Background" Value="Transparent"/>
+                        </Trigger>
+                    </Style.Triggers>
+                </Style>
+            </ListBox.ItemContainerStyle>
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <WrapPanel Margin="0 0">
+                        <TextBlock Text="{Binding Source}" FontFamily="Consolas" FontSize="11" Foreground="#999" Width="24"/>
+                        <TextBlock Text="{Binding Timestamp}" FontFamily="Consolas" FontSize="11" Foreground="#999" Width="60"/>
+                        <TextBlock Text="{Binding Level}" FontFamily="Consolas" FontSize="11" Width="80">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="#333"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Level}" Value="Information">
+                                            <Setter Property="Foreground" Value="#1a73e8"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding Level}" Value="Warning">
+                                            <Setter Property="Foreground" Value="#e37400"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding Level}" Value="Error">
+                                            <Setter Property="Foreground" Value="#d93025"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding Level}" Value="Critical">
+                                            <Setter Property="Foreground" Value="#d93025"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBlock Text="{Binding Message}" FontFamily="Consolas" FontSize="11" Foreground="#333"/>
+                    </WrapPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+    </DockPanel>
 </Window>

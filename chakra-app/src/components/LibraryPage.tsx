@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react"
 import { useParams, useNavigate, useLocation } from "react-router-dom"
+import { useDocumentTitle } from "../hooks/useDocumentTitle"
 import {
     Box,
     Button,
@@ -97,6 +98,13 @@ export function LibraryPage() {
     const [encrypting, setEncrypting] = useState(false)
 
     const initialSyncDone = useRef(false)
+
+    // Dynamic page title based on library name and folder
+    const folderPart =
+        currentFolder === "" || currentFolder === "__root__"
+            ? libraryName
+            : `${libraryName}/${currentFolder}`
+    useDocumentTitle(folderPart ? `${folderPart} · Collect` : "Library Manager · Collect")
 
     // Load library by ID on mount with retry
     useEffect(() => {
@@ -479,6 +487,7 @@ export function LibraryPage() {
                 onCategorizeSave={handleCategorizeSave}
                 isMobile={isMobile}
                 currentFolder={currentFolder}
+                onNavigateToFolder={handleFolderChange}
                 alwaysShowSearch={alwaysShowSearch}
                 onToggleAlwaysShowSearch={() => {
                     setAlwaysShowSearch((v) => {
@@ -565,6 +574,7 @@ export function LibraryPage() {
                 toaster={toaster as CustomToaster}
                 isMobile={isMobile}
                 onAssetsAdded={() => { setPage(1); setAssets([]); loadAssets(1, searchQuery, false, currentFolder || undefined, getSubfolders(currentFolder)) }}
+                currentFolder={currentFolder}
             />
 
             {/* Mobile directory drawer (bottom) */}

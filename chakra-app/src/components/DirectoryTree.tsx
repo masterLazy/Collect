@@ -206,7 +206,9 @@ function FolderNode({
                 borderLeftColor={dragOver
                     ? { base: "blue.300", _dark: "blue.600" }
                     : isSelected
-                        ? "accent.default"
+                        ? isUncategorized
+                            ? { base: "blue.600", _dark: "blue.400" }
+                            : "accent.default"
                         : "transparent"}
                 _hover={{ bg: dragOver ? { base: "blue.100", _dark: "blue.800" } : { base: "blue.50", _dark: "blue.950" } }}
                 onClick={handleClick}
@@ -521,7 +523,7 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
                 cursor="pointer"
                 bg={currentFolder === "" ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
                 borderLeft="2px solid"
-                borderLeftColor={currentFolder === "" ? "accent.default" : "transparent"}
+                borderLeftColor={currentFolder === "" ? { base: "blue.600", _dark: "blue.400" } : "transparent"}
                 _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
                 onClick={() => onFolderChange("")}
                 transition="background 0.1s"

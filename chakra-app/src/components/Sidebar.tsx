@@ -15,12 +15,10 @@ import {
     Stack,
     Text,
 } from "@chakra-ui/react"
-import { api } from "../services/api"
+import { api, API_BASE } from "../services/api"
 import { TagEditor } from "./TagEditor"
 import { DirectoryTreePicker } from "./DirectoryPicker"
 import type { AssetDetailDto, AssetTag } from "../types"
-
-const API_BASE = `http://${window.location.hostname}:5000`
 
 interface SidebarProps {
     assetId: string | null

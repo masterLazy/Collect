@@ -236,20 +236,31 @@ public class AssetsController : ControllerBase
         [FromForm] List<IFormFile> files,
         [FromForm] string targetDir,
         [FromForm] bool keepFilename = false,
-        [FromForm] string? tags = null)
+        [FromForm(Name = "tags")] string? tags = null,
+        [FromForm(Name = "tagsJson")] string? tagsJson = null)
     {
         if (files is null || files.Count == 0)
             return BadRequest(new { error = "No files provided." });
 
         List<AssetTag>? parsedTags = null;
-        if (!string.IsNullOrEmpty(tags))
+        var tagsPayload = !string.IsNullOrWhiteSpace(tags) ? tags : tagsJson;
+        if (!string.IsNullOrWhiteSpace(tagsPayload))
         {
             try
             {
-                parsedTags = System.Text.Json.JsonSerializer.Deserialize<List<AssetTag>>(tags);
+                var options = new System.Text.Json.JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                };
+                parsedTags = System.Text.Json.JsonSerializer.Deserialize<List<AssetTag>>(tagsPayload, options);
             }
             catch { }
         }
+
+        parsedTags = parsedTags?
+            .Where(t => !string.IsNullOrWhiteSpace(t.Value))
+            .Select(t => new AssetTag { Type = t.Type, Value = t.Value.Trim() })
+            .ToList();
 
         var result = await _assetService.UploadAssetsAsync(files, targetDir, keepFilename, parsedTags);
         return Ok(result);

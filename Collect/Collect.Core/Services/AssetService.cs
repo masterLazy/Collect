@@ -503,6 +503,14 @@ public partial class AssetService : IAssetService
     /// Uncategorized tags maintain their original relative order.
     /// Returns the original list reference if already in order.
     /// </summary>
+    private static List<AssetTag> NormalizeTags(IEnumerable<AssetTag>? tags)
+    {
+        return tags?
+            .Where(t => !string.IsNullOrWhiteSpace(t.Value))
+            .Select(t => new AssetTag { Type = t.Type, Value = t.Value.Trim() })
+            .ToList() ?? new List<AssetTag>();
+    }
+
     private static List<AssetTag> ReorderTags(List<AssetTag> tags, List<string>? categoryOrder = null)
     {
         // Build a lookup for category order indices
@@ -756,10 +764,11 @@ public partial class AssetService : IAssetService
                     result.Added++;
 
                     // Apply batch tags if provided (and not keepFilename — tags replace the filename)
-                    if (tags is { Count: > 0 })
+                    var normalizedTags = NormalizeTags(tags);
+                    if (normalizedTags.Count > 0)
                     {
                         var categoryOrder = await _libraryService.GetCategoryOrderAsync();
-                        var orderedTags = ReorderTags(tags, categoryOrder);
+                        var orderedTags = ReorderTags(normalizedTags, categoryOrder);
                         var newExt = Path.GetExtension(destPath);
                         var newName = BuildFileNameFromTags(orderedTags, newExt);
                         var oldDir = Path.GetDirectoryName(destPath) ?? "";
@@ -1117,23 +1126,12 @@ public partial class AssetService : IAssetService
                 var newRelativePath = string.IsNullOrEmpty(oldDir) ? newFileName : oldDir + Path.DirectorySeparatorChar + newFileName;
                 var newFilePath = Path.Combine(libraryPathForRename, newRelativePath);
 
-                _logger.LogDebug(
-                    "[NormalizeTagsAsync] Asset {AssetId}: oldFileName={OldFile}, newFileName={NewFile}, " +
-                    "oldFilePath={OldPath}, newFilePath={NewPath}, " +
-                    "fileNameEquals={FileNameEquals}, targetExists={TargetExists}",
-                    asset.Id, asset.FileName, newFileName,
-                    oldFilePath, newFilePath,
-                    string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase),
-                    File.Exists(newFilePath));
-
                 if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                 {
                     // If current filename already has a disambiguation suffix, skip rename
                     if (HasDisambiguationSuffix(asset.FileName, newFileName))
                     {
-                        _logger.LogTrace(
-                            "[NormalizeTagsAsync] Asset {AssetId}: fileName {FileName} already has a disambiguation suffix for {NewFile}, skipping rename.",
-                            asset.Id, asset.FileName, newFileName);
+                        // Skip rename — asset already has a disambiguation suffix
                     }
                     else if (!File.Exists(newFilePath))
                     {
@@ -1208,12 +1206,6 @@ public partial class AssetService : IAssetService
                             asset.Tags = originalTags;
                         }
                     }
-                }
-                else
-                {
-                    _logger.LogTrace(
-                        "[NormalizeTagsAsync] No rename needed for asset {AssetId}: fileName already matches.",
-                        asset.Id);
                 }
             }
         }
@@ -1380,23 +1372,12 @@ public partial class AssetService : IAssetService
                             : oldDir + Path.DirectorySeparatorChar + newFileName;
                         var newFilePath = Path.Combine(libraryPath, newRelativePath);
 
-                        _logger.LogDebug(
-                            "[ResolveTagConflictsAsync] Asset {AssetId}: oldFileName={OldFile}, newFileName={NewFile}, " +
-                            "oldFilePath={OldPath}, newFilePath={NewPath}, " +
-                            "fileNameEquals={FileNameEquals}, targetExists={TargetExists}",
-                            asset.Id, asset.FileName, newFileName,
-                            oldFilePath, newFilePath,
-                            string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase),
-                            File.Exists(newFilePath));
-
                         if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                         {
                             // If current filename already has a disambiguation suffix, skip rename
                             if (HasDisambiguationSuffix(asset.FileName, newFileName))
                             {
-                                _logger.LogTrace(
-                                    "[ResolveTagConflictsAsync] Asset {AssetId}: fileName {FileName} already has a disambiguation suffix for {NewFile}, skipping rename.",
-                                    asset.Id, asset.FileName, newFileName);
+                                // Skip rename — asset already has a disambiguation suffix
                             }
                             else if (!File.Exists(newFilePath))
                             {
@@ -1472,12 +1453,6 @@ public partial class AssetService : IAssetService
                                 }
                             }
                         }
-                        else
-                        {
-                            _logger.LogTrace(
-                                "[ResolveTagConflictsAsync] No rename needed for asset {AssetId}: fileName already matches.",
-                                asset.Id);
-                        }
                     }
                 }
             }
@@ -1544,23 +1519,12 @@ public partial class AssetService : IAssetService
                             : oldDir + Path.DirectorySeparatorChar + newFileName;
                         var newFilePath = Path.Combine(libraryPath, newRelativePath);
 
-                        _logger.LogDebug(
-                            "[CategorizeTagsAsync] Asset {AssetId}: oldFileName={OldFile}, newFileName={NewFile}, " +
-                            "oldFilePath={OldPath}, newFilePath={NewPath}, " +
-                            "fileNameEquals={FileNameEquals}, targetExists={TargetExists}",
-                            asset.Id, asset.FileName, newFileName,
-                            oldFilePath, newFilePath,
-                            string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase),
-                            File.Exists(newFilePath));
-
                         if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                         {
                             // If current filename already has a disambiguation suffix, skip rename
                             if (HasDisambiguationSuffix(asset.FileName, newFileName))
                             {
-                                _logger.LogTrace(
-                                    "[CategorizeTagsAsync] Asset {AssetId}: fileName {FileName} already has a disambiguation suffix for {NewFile}, skipping rename.",
-                                    asset.Id, asset.FileName, newFileName);
+                                // Skip rename — asset already has a disambiguation suffix
                             }
                             else if (!File.Exists(newFilePath))
                             {
@@ -1635,12 +1599,6 @@ public partial class AssetService : IAssetService
                                     asset.Tags = originalTags;
                                 }
                             }
-                        }
-                        else
-                        {
-                            _logger.LogTrace(
-                                "[CategorizeTagsAsync] No rename needed for asset {AssetId}: fileName already matches.",
-                                asset.Id);
                         }
                     }
                 }

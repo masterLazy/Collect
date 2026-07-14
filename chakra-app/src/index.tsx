@@ -1,4 +1,5 @@
 import "./index.css"
+import "./services/logReporter"
 import * as React from "react"
 import * as ReactDOM from "react-dom/client"
 import { BrowserRouter } from "react-router-dom"

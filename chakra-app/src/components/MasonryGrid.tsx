@@ -2,8 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { Box, Center, Spinner, Text, VStack } from "@chakra-ui/react"
 import { AssetCard } from "./AssetCard"
 import type { AssetDto } from "../types"
-
-const API_BASE = `http://${window.location.hostname}:5000`
+import { API_BASE } from "../services/api"
 
 function EmptyIcon() {
     return (

@@ -83,7 +83,7 @@ function HomePage() {
       <Center height="100vh" bg="bg">
         <VStack gap="4">
           <Text color="fg" fontWeight="bold" fontSize="lg">Cannot connect to server</Text>
-          <Text color="fg.muted" fontSize="sm">Make sure the Collect backend is running on port 5000.</Text>
+          <Text color="fg.muted" fontSize="sm">Make sure the Collect backend service is running and accessible.</Text>
           <Button
             colorPalette="accent"
             onClick={() => {

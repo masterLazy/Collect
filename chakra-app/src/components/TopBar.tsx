@@ -22,6 +22,7 @@ interface TopBarProps {
     onCategorizeSave?: () => void
     isMobile?: boolean
     currentFolder?: string
+    onNavigateToFolder?: (folder: string) => void
     alwaysShowSearch?: boolean
     onToggleAlwaysShowSearch?: () => void
     libraryEncrypted?: boolean
@@ -144,6 +145,7 @@ export function TopBar({
     onCategorizeSave,
     isMobile,
     currentFolder,
+    onNavigateToFolder,
     alwaysShowSearch,
     onToggleAlwaysShowSearch,
     libraryEncrypted,
@@ -244,10 +246,10 @@ export function TopBar({
                                 textDecoration="underline"
                                 textDecorationColor="border"
                                 textUnderlineOffset="3px"
-                                borderRight={{ base: currentFolder ? "none" : "1px solid", md: "1px solid" }}
+                                borderRight={currentFolder ? "none" : { base: "1px solid", md: "1px solid" }}
                                 borderColor="border"
-                                pr={{ base: currentFolder ? "0" : "3", md: "3" }}
-                                mr={{ base: currentFolder ? "0" : "1", md: "1" }}
+                                pr={currentFolder ? "0" : { base: "3", md: "3" }}
+                                mr={currentFolder ? "0" : { base: "1", md: "1" }}
                                 _hover={{ textDecorationColor: "fg", color: "fg" }}
                                 title="Click for details"
                             >
@@ -322,29 +324,71 @@ export function TopBar({
                     </Popover.Root>
                 )}
 
-                {/* Mobile: current folder indicator */}
-                {currentFolder !== undefined && (
-                    <Text
-                        fontSize="sm"
-                        color="fg.muted"
+                {/* Breadcrumb: library name + folder path */}
+                {currentFolder !== undefined && currentFolder !== "" && (
+                    <HStack
+                        gap="1"
                         flex="1"
                         minW="0"
-                        truncate
-                        display={{ base: "inline", md: "none" }}
-                        title={
-                            currentFolder === ""
-                                ? "All Assets"
-                                : currentFolder === "__root__"
-                                    ? "Root"
-                                    : currentFolder
-                        }
+                        fontSize="sm"
+                        color="fg.muted"
                     >
-                        {currentFolder === ""
-                            ? ""
-                            : currentFolder === "__root__"
-                                ? "\\"
-                                : currentFolder}
-                    </Text>
+                        {/* Separator slash after library name */}
+                        <Text color="fg.subtle" flexShrink="0">/</Text>
+
+                        {/* Desktop: full breadcrumb with clickable segments */}
+                        <HStack
+                            gap="1"
+                            display={{ base: "none", md: "flex" }}
+                            minW="0"
+                            flex="1"
+                        >
+                            {currentFolder === "__root__" ? (
+                                <Text color="fg.subtle" truncate>Root</Text>
+                            ) : (
+                                currentFolder.split("/").map((segment, idx, arr) => {
+                                    const isLast = idx === arr.length - 1
+                                    const parentPath = arr.slice(0, idx + 1).join("/")
+                                    return (
+                                        <HStack gap="1" key={idx} minW="0">
+                                            {idx > 0 && <Text color="fg.subtle" flexShrink="0">/</Text>}
+                                            {isLast ? (
+                                                <Text truncate color="fg.subtle">{segment}</Text>
+                                            ) : (
+                                                <Text
+                                                    truncate
+                                                    cursor="pointer"
+                                                    color="fg"
+                                                    _hover={{ color: "accent.default", textDecoration: "underline" }}
+                                                    onClick={() => onNavigateToFolder?.(parentPath)}
+                                                >
+                                                    {segment}
+                                                </Text>
+                                            )}
+                                        </HStack>
+                                    )
+                                })
+                            )}
+                        </HStack>
+
+                        {/* Mobile: truncated breadcrumb */}
+                        <Text
+                            display={{ base: "inline", md: "none" }}
+                            truncate
+                            color="fg.subtle"
+                            title={currentFolder}
+                        >
+                            {currentFolder === "__root__"
+                                ? "Root"
+                                : (() => {
+                                    const segments = currentFolder.split("/")
+                                    if (segments.length <= 2) {
+                                        return currentFolder
+                                    }
+                                    return `${segments[0]}/.../${segments[segments.length - 1]}`
+                                })()}
+                        </Text>
+                    </HStack>
                 )}
 
                 {/* Desktop: SearchInput stays in first row */}

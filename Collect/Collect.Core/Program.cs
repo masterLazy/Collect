@@ -42,6 +42,43 @@ app.UseCors();
 
 app.MapControllers();
 
+// ── Port Resolution ──────────────────────────────────
+// Try the requested port, then up to 4 sequential ports (5000-5004 by default).
+// If all are busy, fall back to an OS-assigned port.
+
+var requestedPort = args.Length > 0 ? args[0] : "5000";
+int.TryParse(requestedPort, out var portNum);
+if (portNum <= 0 || portNum > 65535)
+    portNum = 5000;
+
+bool portFree = false;
+for (int i = 0; i < 5; i++)
+{
+    int candidate = portNum + i;
+    try
+    {
+        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, candidate);
+        listener.Start();
+        listener.Stop();
+        portNum = candidate;
+        portFree = true;
+        break;
+    }
+    catch
+    {
+        Console.WriteLine($"[Collect] Port {candidate} is in use, trying next...");
+    }
+}
+
+if (!portFree)
+{
+    Console.WriteLine($"[Collect] Ports {portNum}-{portNum + 4} are all in use, using a random available port.");
+    portNum = 0;
+}
+
+Console.WriteLine($"[Collect] Starting on port {portNum}");
+
 // ── Startup ───────────────────────────────────────────
-var port = args.Length > 0 ? args[0] : "5000";
-app.Run($"http://0.0.0.0:{port}");
+app.Urls.Clear();
+app.Urls.Add($"http://0.0.0.0:{portNum}");
+app.Run();

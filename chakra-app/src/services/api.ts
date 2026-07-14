@@ -1,6 +1,10 @@
-import type { AssetDetailDto, AssetDto, AssetTag, DirectoryTreeResponse, LibraryInfo, PaginatedResponse, ScanResult, ServerBrowseResponse, ServerDrive, TagConflict, TagGroupsResponse, UploadResult } from "../types";
+import type { AssetDetailDto, AssetDto, AssetTag, DirectoryNode, DirectoryTreeResponse, LibraryInfo, PaginatedResponse, ScanResult, ServerBrowseResponse, ServerDrive, TagConflict, TagGroupsResponse, UploadResult } from "../types";
 
-const API_BASE = `http://${window.location.hostname}:5000`;
+// In development (npm start), the CRA dev server proxies /api/* to the backend.
+// In production (CollectHost), the backend serves both API and static files on the same origin.
+// So we always use relative URLs — the proxy / same-origin handles the rest.
+// Override with REACT_APP_API_PORT in .env.development when backend runs on a non-default port.
+export const API_BASE = "";
 
 // ── Unlock Token Management ──────────────────────────
 // Token is stored in sessionStorage (persists across F5, cleared on tab close)
@@ -59,6 +63,22 @@ async function put<T>(url: string, body: unknown): Promise<T> {
     return response.json();
 }
 
+// ── Path Normalization ────────────────────────────────
+// Backend paths use OS-native separators (\ on Windows).
+// The frontend consistently uses / as the path separator.
+
+function normalizePath(path: string): string {
+    return path.replace(/\\/g, "/");
+}
+
+function normalizeDirectoryNode(node: DirectoryNode): DirectoryNode {
+    return {
+        ...node,
+        path: normalizePath(node.path),
+        children: node.children?.map(normalizeDirectoryNode) ?? [],
+    };
+}
+
 export const api = {
     initLibrary: (path: string, name: string, password?: string) =>
         post<LibraryInfo>("/api/library/init", { path, name, ...(password ? { password } : {}) }),
@@ -66,7 +86,13 @@ export const api = {
     scanAssets: () => post<ScanResult>("/api/assets/scan"),
     resolveTagConflicts: (resolutions: { tagValue: string; chosenType: string }[]) =>
         post<{ success: boolean }>("/api/assets/resolve-tag-conflicts", { resolutions }),
-    getDirectoryTree: () => get<DirectoryTreeResponse>("/api/library/tree"),
+    getDirectoryTree: async () => {
+        const result = await get<DirectoryTreeResponse>("/api/library/tree");
+        return {
+            ...result,
+            root: normalizeDirectoryNode(result.root),
+        };
+    },
     createDirectory: (relativePath: string) =>
         post<{ path: string }>("/api/library/create-directory", { relativePath }),
     renameDirectory: (relativePath: string, newName: string) =>
@@ -79,7 +105,11 @@ export const api = {
         formData.append("targetDir", targetDir)
         formData.append("keepFilename", String(keepFilename ?? false))
         if (tags && tags.length > 0) {
-            formData.append("tags", JSON.stringify(tags))
+            const normalizedTags = tags
+                .filter((tag) => tag && tag.value && tag.value.trim())
+                .map((tag) => ({ type: tag.type ?? null, value: tag.value.trim() }))
+            formData.append("tags", JSON.stringify(normalizedTags))
+            formData.append("tagsJson", JSON.stringify(normalizedTags))
         }
         const res = await fetch(API_BASE + "/api/assets/upload", {
             method: "POST",
@@ -96,7 +126,13 @@ export const api = {
         if (sort) url += `&sort=${sort}`
         return get<PaginatedResponse<AssetDto>>(url)
     },
-    getAsset: (id: string) => get<AssetDetailDto>(`/api/assets/${id}`),
+    getAsset: async (id: string) => {
+        const result = await get<AssetDetailDto>(`/api/assets/${id}`);
+        return {
+            ...result,
+            relativePath: normalizePath(result.relativePath),
+        };
+    },
     searchAssets: (query: string, page: number, size: number, folder?: string) =>
         get<PaginatedResponse<AssetDto>>(`/api/assets/search?q=${encodeURIComponent(query)}&page=${page}&size=${size}${folder ? `&folder=${encodeURIComponent(folder)}` : ""}`),
     updateTags: (id: string, tags: AssetTag[]) =>

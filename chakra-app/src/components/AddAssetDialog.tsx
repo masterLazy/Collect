@@ -24,6 +24,7 @@ interface AddAssetDialogProps {
     toaster: CustomToaster
     isMobile?: boolean
     onAssetsAdded: () => void
+    currentFolder?: string
 }
 
 interface FileEntry {
@@ -67,7 +68,7 @@ function formatSize(bytes: number): string {
     return bytes + " B"
 }
 
-export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssetsAdded }: AddAssetDialogProps) {
+export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssetsAdded, currentFolder = "" }: AddAssetDialogProps) {
     const [files, setFiles] = useState<FileEntry[]>([])
     const [targetDir, setTargetDir] = useState("Uncategorized")
     const [uploading, setUploading] = useState(false)
@@ -79,8 +80,14 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
 
     useEffect(() => {
         if (open) {
+            const defaultTargetDir = currentFolder === ""
+                ? "Uncategorized"
+                : currentFolder === "__root__"
+                    ? ""
+                    : currentFolder
+
             setFiles([])
-            setTargetDir("Uncategorized")
+            setTargetDir(defaultTargetDir)
             setUploading(false)
             setDragOver(false)
             setFolderDialogOpen(false)
@@ -88,7 +95,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
             setKeepFilename(false)
             setBatchTags([])
         }
-    }, [open])
+    }, [open, currentFolder])
 
     const addFiles = (fileList: FileList) => {
         const newEntries: FileEntry[] = Array.from(fileList).map((f) => {
