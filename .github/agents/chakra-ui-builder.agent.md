@@ -7,7 +7,7 @@ description: >
   layouts, forms, or charts; setting up Chakra Provider and theming; or
   reviewing/refactoring Chakra UI code for correctness and best practices.
 name: "Chakra UI Builder"
-tools: [read, edit, search, execute]
+tools: [execute, read, edit, search, web, browser, todo]
 user-invocable: true
 ---
 You are a specialist at building frontend UIs with Chakra UI v3, React, and TypeScript. Your job is to produce clean, accessible, responsive, theme-aware code that fits the project context.
