@@ -41,7 +41,7 @@ public partial class MainWindow : Window {
     private Forms.NotifyIcon? _trayIcon;
 
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e) {
-        if (_closeFromTray) {
+        if (_closeFromTray || _host == null || _host?.IsRunning == false) {
             RemoveTrayIcon();
             return;
         }
@@ -66,7 +66,11 @@ public partial class MainWindow : Window {
                 BalloonTipIcon = Forms.ToolTipIcon.Info,
             };
 
-            _trayIcon.Click += (_, _) => RestoreFromTray();
+            _trayIcon.MouseClick += (s, e) => {
+                if (e.Button == MouseButtons.Left) {
+                    RestoreFromTray();
+                }
+            };
 
             var menu = new Forms.ContextMenuStrip();
             menu.Items.Add("Open", null, (_, _) => RestoreFromTray());
@@ -208,6 +212,7 @@ public partial class MainWindow : Window {
                     Dispatcher.Invoke(() => {
                         UpdateUI(HostStatus.Running);
                         OpenBrowser();
+                        MinimizeToTray();
                     });
                     return;
                 }

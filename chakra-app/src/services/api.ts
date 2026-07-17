@@ -34,7 +34,16 @@ async function get<T>(url: string): Promise<T> {
         headers: buildHeaders(),
     });
     if (!response.ok) {
-        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+        let errorMsg = `API Error: ${response.status} ${response.statusText}`;
+        try {
+            const errorBody = await response.json();
+            if (errorBody.error) {
+                errorMsg = `${response.status} - ${errorBody.error}`;
+            } else if (errorBody.detail) {
+                errorMsg = `${response.status} - ${errorBody.detail}`;
+            }
+        } catch { /* ignore parsing errors */ }
+        throw new Error(errorMsg);
     }
     return response.json();
 }
@@ -46,7 +55,16 @@ async function post<T>(url: string, body?: unknown): Promise<T> {
         body: body ? JSON.stringify(body) : undefined,
     });
     if (!response.ok) {
-        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+        let errorMsg = `API Error: ${response.status} ${response.statusText}`;
+        try {
+            const errorBody = await response.json();
+            if (errorBody.error) {
+                errorMsg = `${response.status} - ${errorBody.error}`;
+            } else if (errorBody.detail) {
+                errorMsg = `${response.status} - ${errorBody.detail}`;
+            }
+        } catch { /* ignore parsing errors */ }
+        throw new Error(errorMsg);
     }
     return response.json();
 }
@@ -58,7 +76,16 @@ async function put<T>(url: string, body: unknown): Promise<T> {
         body: JSON.stringify(body),
     });
     if (!response.ok) {
-        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+        let errorMsg = `API Error: ${response.status} ${response.statusText}`;
+        try {
+            const errorBody = await response.json();
+            if (errorBody.error) {
+                errorMsg = `${response.status} - ${errorBody.error}`;
+            } else if (errorBody.detail) {
+                errorMsg = `${response.status} - ${errorBody.detail}`;
+            }
+        } catch { /* ignore parsing errors */ }
+        throw new Error(errorMsg);
     }
     return response.json();
 }

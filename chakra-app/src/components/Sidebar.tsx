@@ -27,7 +27,7 @@ interface SidebarProps {
     onTagClick?: (value: string) => void
     selectedTags?: string[]
     onTagsSaved?: (updated: AssetDetailDto) => void
-    onRefreshRequested?: () => void
+    onRefreshRequested?: (assetId?: string, reason?: 'deleted' | 'moved') => void
 }
 
 function XIcon() {
@@ -128,12 +128,15 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [selectedMoveTarget, setSelectedMoveTarget] = useState<string>("")
     const [moveTargetSelected, setMoveTargetSelected] = useState(false)
     const [moving, setMoving] = useState(false)
+    const [deleted, setDeleted] = useState(false)
 
     useEffect(() => {
         if (!assetId) {
             setAsset(null)
+            setDeleted(false)
             return
         }
+        setDeleted(false)
         setLoading(true)
         setError(false)
         setImageLoaded(false)
@@ -234,8 +237,10 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         try {
             await api.deleteAsset(asset.id)
             toaster.create({ title: "Asset deleted", type: "success" })
-            onRefreshRequested?.()
-            onClose()
+            setDeleted(true)
+            setAsset(null)
+            setDeleteConfirmOpen(false)
+            onRefreshRequested?.(asset.id, 'deleted')
         } catch {
             toaster.create({ title: "Delete failed", type: "error" })
         }
@@ -257,7 +262,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
             setTags(updated.tags)
             toaster.create({ title: "Moved to " + (target || "root"), type: "success" })
             setMoveDialogOpen(false)
-            onRefreshRequested?.()
+            onRefreshRequested?.(asset.id, 'moved')
         } catch {
             toaster.create({ title: "Move failed", type: "error" })
         } finally {
@@ -394,8 +399,34 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                 </Stack>
             )}
 
+            {/* Asset deleted state */}
+            {deleted && (
+                <Stack gap="4">
+                    <Box
+                        borderRadius="md"
+                        bg="bg.subtle"
+                        border="1px solid"
+                        borderColor="border"
+                        p="6"
+                        textAlign="center"
+                    >
+                        <Stack gap="2">
+                            <Text color="fg.muted" fontSize="lg">Asset deleted</Text>
+                            <Text color="fg.subtle" fontSize="sm">This asset has been removed from the library.</Text>
+                        </Stack>
+                    </Box>
+                    <Button size="xs" variant="outline" width="full" disabled>
+                        Move to...
+                    </Button>
+                    <Button size="xs" variant="outline" colorPalette="red" disabled>
+                        <TrashIcon />
+                        <Box as="span" ml="1">Delete</Box>
+                    </Button>
+                </Stack>
+            )}
+
             {/* Asset details */}
-            {asset && !loading && (
+            {asset && !loading && !deleted && (
                 <>
                     {/* Tags first — right after preview image */}
                     <Box pt="1">

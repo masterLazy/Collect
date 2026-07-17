@@ -8,6 +8,7 @@ interface AssetCardProps {
     onClick: () => void
     onDragStart?: (e: React.DragEvent) => void
     onDragEnd?: (e: React.DragEvent) => void
+    removed?: { reason: 'deleted' | 'moved' }
 }
 
 function BrokenImageIcon() {
@@ -31,33 +32,40 @@ function DragHandleIcon() {
     )
 }
 
-export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd }: AssetCardProps) {
+export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, removed }: AssetCardProps) {
     const [loaded, setLoaded] = useState(false)
     const [error, setError] = useState(false)
     const [hovered, setHovered] = useState(false)
     const isLandscape = asset.width > asset.height
     const aspectRatio = isLandscape ? 4 / 3 : (asset.width && asset.height ? asset.width / asset.height : 4 / 3)
 
+    const isRemoved = !!removed
+
     return (
         <Box
-            cursor="pointer"
-            onClick={onClick}
+            cursor={isRemoved ? "default" : "pointer"}
+            onClick={isRemoved ? undefined : onClick}
             borderRadius="md"
             overflow="hidden"
             bg="bg.subtle"
             border="1px solid"
             borderColor="border"
             transition="all 0.2s"
-            _hover={{ transform: "translateY(-2px)", shadow: "md" }}
-            onMouseEnter={() => setHovered(true)}
-            onMouseLeave={() => setHovered(false)}
+            _hover={isRemoved ? {} : { transform: "translateY(-2px)", shadow: "md" }}
+            onMouseEnter={isRemoved ? undefined : () => setHovered(true)}
+            onMouseLeave={isRemoved ? undefined : () => setHovered(false)}
             position="relative"
+            pointerEvents={isRemoved ? "none" : undefined}
         >
             <Box
                 position="relative"
                 overflow="hidden"
                 width="full"
-                css={{ aspectRatio }}
+                css={{
+                    aspectRatio,
+                    filter: isRemoved ? "blur(8px) brightness(1.3)" : undefined,
+                    _dark: isRemoved ? { filter: "blur(8px) brightness(0.5)" } : undefined,
+                }}
             >
                 {!loaded && !error && (
                     <Skeleton
@@ -102,31 +110,53 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd }: A
             </Box>
 
             {/* Drag handle — top-right, visible on hover */}
-            <Box
-                position="absolute"
-                top="1.5"
-                right="1.5"
-                width="24px"
-                height="24px"
-                borderRadius="sm"
-                display={hovered ? "flex" : "none"}
-                alignItems="center"
-                justifyContent="center"
-                bg="black/45"
-                color="white"
-                cursor="grab"
-                draggable
-                opacity={hovered ? 1 : 0}
-                transition="opacity 0.15s"
-                _active={{ cursor: "grabbing", bg: "black/65" }}
-                onDragStart={onDragStart}
-                onDragEnd={onDragEnd}
-                onClick={(e) => e.stopPropagation()}
-                title="Drag to move to folder"
-                zIndex="1"
-            >
-                <DragHandleIcon />
-            </Box>
+            {!isRemoved && (
+                <Box
+                    position="absolute"
+                    top="1.5"
+                    right="1.5"
+                    width="24px"
+                    height="24px"
+                    borderRadius="sm"
+                    display={hovered ? "flex" : "none"}
+                    alignItems="center"
+                    justifyContent="center"
+                    bg="black/45"
+                    color="white"
+                    cursor="grab"
+                    draggable
+                    opacity={hovered ? 1 : 0}
+                    transition="opacity 0.15s"
+                    _active={{ cursor: "grabbing", bg: "black/65" }}
+                    onDragStart={onDragStart}
+                    onDragEnd={onDragEnd}
+                    onClick={(e) => e.stopPropagation()}
+                    title="Drag to move to folder"
+                    zIndex="1"
+                >
+                    <DragHandleIcon />
+                </Box>
+            )}
+
+            {/* Removed overlay — same style as Failed to load but with blur+overlay */}
+            {isRemoved && (
+                <Box
+                    position="absolute"
+                    inset="0"
+                    display="flex"
+                    flexDirection="column"
+                    alignItems="center"
+                    justifyContent="center"
+                    gap="2"
+                    bg="bg.muted/60"
+                    color="fg.muted"
+                    fontSize="sm"
+                    zIndex="2"
+                >
+                    <BrokenImageIcon />
+                    <Box>{removed!.reason === 'deleted' ? 'Deleted' : 'Moved'}</Box>
+                </Box>
+            )}
         </Box>
     )
 }

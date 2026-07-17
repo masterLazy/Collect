@@ -96,7 +96,8 @@ export function LibraryPage() {
     const [encryptConfirm, setEncryptConfirm] = useState("")
     const [encryptError, setEncryptError] = useState("")
     const [encrypting, setEncrypting] = useState(false)
-
+    // Track removed asset IDs with reason for permanent blur overlay
+    const [removedAssetMap, setRemovedAssetMap] = useState<Map<string, 'deleted' | 'moved'>>(new Map())
     const initialSyncDone = useRef(false)
 
     // Dynamic page title based on library name and folder
@@ -287,14 +288,26 @@ export function LibraryPage() {
         loadAssets(nextPage, searchQuery, true, toApiFolder(currentFolder), getSubfolders(currentFolder))
     }, [loading, page, searchQuery, loadAssets, currentFolder])
 
-    const handleAssetMoved = useCallback(() => {
-        setPage(1)
-        setAssets([])
+    const handleAssetMoved = useCallback((assetId?: string, reason?: 'deleted' | 'moved') => {
+        if (!assetId) {
+            // Fallback: full refresh
+            setPage(1)
+            setAssets([])
+            setTreeRefreshKey((k) => k + 1)
+            loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
+            return
+        }
+        if (reason === 'deleted' || reason === 'moved') {
+            // Keep the card in grid with permanent blur overlay
+            setRemovedAssetMap((prev) => new Map(prev).set(assetId, reason!))
+        }
+        // Always refresh directory tree counts after any change
         setTreeRefreshKey((k) => k + 1)
-        loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
     }, [loadAssets, searchQuery, currentFolder])
 
     const handleMoveAsset = useCallback(async (assetId: string, targetFolder: string) => {
+        // Show blur overlay immediately
+        setRemovedAssetMap((prev) => new Map(prev).set(assetId, 'moved'))
         try {
             await api.moveAsset(assetId, targetFolder)
             toaster.create({
@@ -302,16 +315,22 @@ export function LibraryPage() {
                 description: `Moved to ${targetFolder || "root"}`,
                 type: "success",
             })
-            handleAssetMoved()
+            // Refresh directory tree counts — grid stays unchanged
             setTreeRefreshKey((k) => k + 1)
         } catch {
+            // Move failed — remove blur overlay
+            setRemovedAssetMap((prev) => {
+                const next = new Map(prev)
+                next.delete(assetId)
+                return next
+            })
             toaster.create({
                 title: "Move failed",
                 description: "Could not move asset to that folder.",
                 type: "error",
             })
         }
-    }, [handleAssetMoved, toaster])
+    }, [toaster])
 
     const handleCategorizeSave = useCallback(() => {
         setPage(1)
@@ -325,6 +344,7 @@ export function LibraryPage() {
             const result = await api.scanAssets()
             setPage(1)
             setAssets([])
+            setTreeRefreshKey((k) => k + 1)
             loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
 
             // Check for tag conflicts
@@ -343,7 +363,7 @@ export function LibraryPage() {
         } finally {
             setScanning(false)
         }
-    }, [loadAssets, searchQuery, currentFolder, toaster])
+    }, [loadAssets, searchQuery, currentFolder, toaster, setTreeRefreshKey])
 
     const handleResolveConflicts = useCallback(async (resolutions: { tagValue: string; chosenType: string }[]) => {
         setResolvingConflicts(true)
@@ -510,6 +530,7 @@ export function LibraryPage() {
                 decrypting={decrypting}
                 onEncrypt={() => setShowEncryptDialog(true)}
                 encrypting={encrypting}
+                toaster={toaster}
                 onLock={async () => {
                     try {
                         await api.lockLibrary();
@@ -561,11 +582,12 @@ export function LibraryPage() {
                         onSelectAsset={handleSelectAsset}
                         currentFolder={currentFolder}
                         searchQuery={searchQuery}
+                        removedAssetIds={removedAssetMap}
                     />
                 </Box>
 
                 {/* Right: Docked Sidebar (desktop only) */}
-                {selectedAssetId && <SidebarPanel assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={handleAssetMoved} />}
+                {selectedAssetId && <SidebarPanel assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />}
             </Box>
 
             <AddAssetDialog
@@ -573,7 +595,7 @@ export function LibraryPage() {
                 onOpenChange={setAddDialogOpen}
                 toaster={toaster as CustomToaster}
                 isMobile={isMobile}
-                onAssetsAdded={() => { setPage(1); setAssets([]); loadAssets(1, searchQuery, false, currentFolder || undefined, getSubfolders(currentFolder)) }}
+                onAssetsAdded={() => { setPage(1); setAssets([]); setTreeRefreshKey((k) => k + 1); loadAssets(1, searchQuery, false, currentFolder || undefined, getSubfolders(currentFolder)) }}
                 currentFolder={currentFolder}
             />
 
@@ -629,7 +651,7 @@ export function LibraryPage() {
                                 </HStack>
                             </Drawer.Header>
                             <Drawer.Body p="4">
-                                <Sidebar assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={handleAssetMoved} />
+                                <Sidebar assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />
                             </Drawer.Body>
                         </Drawer.Content>
                     </Drawer.Positioner>
@@ -843,7 +865,7 @@ function SidebarPanel({ assetId, onClose, toaster, onTagClick, selectedTags, onR
     toaster: CustomToaster
     onTagClick?: (value: string) => void
     selectedTags?: string[]
-    onRefreshRequested?: () => void
+    onRefreshRequested?: (assetId?: string, reason?: 'deleted' | 'moved') => void
 }) {
     const panelRef = useRef<HTMLDivElement>(null)
     const dragging = useRef(false)

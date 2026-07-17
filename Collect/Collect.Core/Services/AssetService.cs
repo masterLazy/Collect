@@ -160,7 +160,7 @@ public partial class AssetService : IAssetService
                 }
             }
 
-            var removed = _assets.Count - newAssets.Count;
+            var removed = _assets.Count(a => !scannedPaths.Contains(a.RelativePath));
             _assets = newAssets;
 
             // Clean up orphaned thumbnails (from renamed/deleted files)
@@ -455,7 +455,8 @@ public partial class AssetService : IAssetService
                 {
                     // No collision, rename directly
                     _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
-                    File.Move(oldFilePath, newFilePath);
+                    if (!TryMoveWithRetry(oldFilePath, newFilePath))
+                        return false;
                     asset.FileName = newFileName;
                     asset.RelativePath = newRelativePath;
                 }
@@ -472,15 +473,13 @@ public partial class AssetService : IAssetService
                         if (!File.Exists(suffixedPath))
                         {
                             try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
-                            try
+                            if (TryMoveWithRetry(oldFilePath, suffixedPath))
                             {
-                                File.Move(oldFilePath, suffixedPath);
                                 asset.FileName = suffixedName;
                                 asset.RelativePath = suffixedRelPath;
                                 found = true;
                                 break;
                             }
-                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { break; }
                         }
                     }
                     if (!found)
@@ -604,6 +603,29 @@ public partial class AssetService : IAssetService
             return false;
         var suffix = currentWithoutExt.Substring(baseWithoutExt.Length);
         return suffix.Length >= 3 && suffix[0] == '-' && suffix.Substring(1).All(char.IsDigit);
+    }
+
+    /// <summary>
+    /// Attempt a File.Move with retries to handle transient locks from antivirus / search indexer.
+    /// Retries up to <paramref name="maxRetries"/> times with a <paramref name="delayMs"/> pause between attempts.
+    /// Returns true if the move succeeded.
+    /// </summary>
+    private static bool TryMoveWithRetry(string sourcePath, string destPath, int maxRetries = 5, int delayMs = 200)
+    {
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                File.Move(sourcePath, destPath);
+                return true;
+            }
+            catch (IOException) when (attempt < maxRetries)
+            {
+                // File locked by another process — wait and retry
+                Thread.Sleep(delayMs);
+            }
+        }
+        return false;
     }
 
     // ──────────────────────────────────────────────
@@ -1789,6 +1811,9 @@ public partial class AssetService : IAssetService
         {
             foreach (var asset in _assets)
             {
+                // Save original tags BEFORE modifying — needed to revert if file rename fails
+                var originalTags = asset.Tags.Select(t => new AssetTag { Type = t.Type, Value = t.Value }).ToList();
+
                 bool tagsChanged = false;
                 for (int i = 0; i < asset.Tags.Count; i++)
                 {
@@ -1821,12 +1846,83 @@ public partial class AssetService : IAssetService
 
                     if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (!File.Exists(newFilePath))
+                        // If current filename already has a disambiguation suffix, skip rename
+                        if (HasDisambiguationSuffix(asset.FileName, newFileName))
                         {
-                            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
-                            File.Move(oldFilePath, newFilePath);
-                            asset.FileName = newFileName;
-                            asset.RelativePath = newRelativePath;
+                            // Skip rename — asset already has a disambiguation suffix
+                        }
+                        else if (!File.Exists(newFilePath))
+                        {
+                            // No collision, rename directly
+                            try
+                            {
+                                _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex,
+                                    "[RenameTagValueAsync] DeleteThumbnail failed for asset {AssetId}: {OldPath}. Continuing with rename.",
+                                    asset.Id, oldFilePath);
+                            }
+                            try
+                            {
+                                File.Move(oldFilePath, newFilePath);
+                                _logger.LogInformation(
+                                    "[RenameTagValueAsync] Successfully renamed asset {AssetId}: {OldFile} -> {NewFile}",
+                                    asset.Id, asset.FileName, newFileName);
+                                asset.FileName = newFileName;
+                                asset.RelativePath = newRelativePath;
+                            }
+                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                            {
+                                _logger.LogError(ex,
+                                    "[RenameTagValueAsync] File.Move failed for asset {AssetId}: {OldPath} -> {NewPath}. Reverting tags.",
+                                    asset.Id, oldFilePath, newFilePath);
+                                // Revert in-memory tags to match disk state
+                                asset.Tags = originalTags;
+                            }
+                        }
+                        else
+                        {
+                            // Collision: try numeric suffixes
+                            var baseWithoutExt = Path.GetFileNameWithoutExtension(newFileName);
+                            bool found = false;
+                            for (int i = 1; i <= 99; i++)
+                            {
+                                var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
+                                var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
+                                var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
+                                if (!File.Exists(suffixedPath))
+                                {
+                                    try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                                    try
+                                    {
+                                        File.Move(oldFilePath, suffixedPath);
+                                        _logger.LogInformation(
+                                            "[RenameTagValueAsync] Successfully renamed asset {AssetId}: {OldFile} -> {SuffixedName}",
+                                            asset.Id, asset.FileName, suffixedName);
+                                        asset.FileName = suffixedName;
+                                        asset.RelativePath = suffixedRelPath;
+                                        found = true;
+                                        break;
+                                    }
+                                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                                    {
+                                        _logger.LogError(ex,
+                                            "[RenameTagValueAsync] File.Move failed for asset {AssetId}: {OldPath} -> {SuffixedPath}. Reverting tags.",
+                                            asset.Id, oldFilePath, suffixedPath);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!found)
+                            {
+                                _logger.LogWarning(
+                                    "[RenameTagValueAsync] Could not find unique suffixed name for asset {AssetId}: {NewPath}. Reverting tags.",
+                                    asset.Id, newFilePath);
+                                // Could not find a unique name — revert in-memory tags to match disk
+                                asset.Tags = originalTags;
+                            }
                         }
                     }
                 }
@@ -1876,21 +1972,13 @@ public partial class AssetService : IAssetService
             }
 
             // Update library.json with encryption metadata
-            var collectDir = Path.Combine(libraryPath, ".collect");
-            var infoPath = Path.Combine(collectDir, "library.json");
-            if (File.Exists(infoPath))
+            await _libraryService.UpdateLibraryInfoAsync(info =>
             {
-                var json = await File.ReadAllTextAsync(infoPath);
-                var info = System.Text.Json.JsonSerializer.Deserialize<LibraryInfo>(json);
-                if (info is not null)
-                {
-                    info.IsEncrypted = true;
-                    info.Salt = Convert.ToBase64String(salt);
-                    info.VerificationHash = Convert.ToBase64String(verificationHash);
-                    info.AssetCount = _assets.Count;
-                    await File.WriteAllTextAsync(infoPath, System.Text.Json.JsonSerializer.Serialize(info, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
-                }
-            }
+                info.IsEncrypted = true;
+                info.Salt = Convert.ToBase64String(salt);
+                info.VerificationHash = Convert.ToBase64String(verificationHash);
+                info.AssetCount = _assets.Count;
+            });
 
             // Update registry
             await _libraryService.UpdateAssetCountAsync(_assets.Count);
@@ -2000,21 +2088,13 @@ public partial class AssetService : IAssetService
             }
 
             // Remove encryption metadata from library.json
-            var collectDir = Path.Combine(libraryPath, ".collect");
-            var infoPath = Path.Combine(collectDir, "library.json");
-            if (File.Exists(infoPath))
+            await _libraryService.UpdateLibraryInfoAsync(info =>
             {
-                var json = await File.ReadAllTextAsync(infoPath);
-                var info = System.Text.Json.JsonSerializer.Deserialize<LibraryInfo>(json);
-                if (info is not null)
-                {
-                    info.IsEncrypted = false;
-                    info.Salt = null;
-                    info.VerificationHash = null;
-                    info.AssetCount = _assets.Count;
-                    await File.WriteAllTextAsync(infoPath, System.Text.Json.JsonSerializer.Serialize(info, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
-                }
-            }
+                info.IsEncrypted = false;
+                info.Salt = null;
+                info.VerificationHash = null;
+                info.AssetCount = _assets.Count;
+            });
 
             // Update registry to reflect decrypted status
             await _libraryService.UpdateAssetCountAsync(_assets.Count);
@@ -2044,6 +2124,9 @@ public partial class AssetService : IAssetService
         {
             foreach (var asset in _assets)
             {
+                // Save original tags BEFORE modifying — needed to revert if file rename fails
+                var originalTags = asset.Tags.Select(t => new AssetTag { Type = t.Type, Value = t.Value }).ToList();
+
                 bool tagsChanged = false;
                 for (int i = asset.Tags.Count - 1; i >= 0; i--)
                 {
@@ -2074,12 +2157,83 @@ public partial class AssetService : IAssetService
 
                     if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (!File.Exists(newFilePath))
+                        // If current filename already has a disambiguation suffix, skip rename
+                        if (HasDisambiguationSuffix(asset.FileName, newFileName))
                         {
-                            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
-                            File.Move(oldFilePath, newFilePath);
-                            asset.FileName = newFileName;
-                            asset.RelativePath = newRelativePath;
+                            // Skip rename — asset already has a disambiguation suffix
+                        }
+                        else if (!File.Exists(newFilePath))
+                        {
+                            // No collision, rename directly
+                            try
+                            {
+                                _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex,
+                                    "[DeleteTagValueAsync] DeleteThumbnail failed for asset {AssetId}: {OldPath}. Continuing with rename.",
+                                    asset.Id, oldFilePath);
+                            }
+                            try
+                            {
+                                File.Move(oldFilePath, newFilePath);
+                                _logger.LogInformation(
+                                    "[DeleteTagValueAsync] Successfully renamed asset {AssetId}: {OldFile} -> {NewFile}",
+                                    asset.Id, asset.FileName, newFileName);
+                                asset.FileName = newFileName;
+                                asset.RelativePath = newRelativePath;
+                            }
+                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                            {
+                                _logger.LogError(ex,
+                                    "[DeleteTagValueAsync] File.Move failed for asset {AssetId}: {OldPath} -> {NewPath}. Reverting tags.",
+                                    asset.Id, oldFilePath, newFilePath);
+                                // Revert in-memory tags to match disk state
+                                asset.Tags = originalTags;
+                            }
+                        }
+                        else
+                        {
+                            // Collision: try numeric suffixes
+                            var baseWithoutExt = Path.GetFileNameWithoutExtension(newFileName);
+                            bool found = false;
+                            for (int i = 1; i <= 99; i++)
+                            {
+                                var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
+                                var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
+                                var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
+                                if (!File.Exists(suffixedPath))
+                                {
+                                    try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                                    try
+                                    {
+                                        File.Move(oldFilePath, suffixedPath);
+                                        _logger.LogInformation(
+                                            "[DeleteTagValueAsync] Successfully renamed asset {AssetId}: {OldFile} -> {SuffixedName}",
+                                            asset.Id, asset.FileName, suffixedName);
+                                        asset.FileName = suffixedName;
+                                        asset.RelativePath = suffixedRelPath;
+                                        found = true;
+                                        break;
+                                    }
+                                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                                    {
+                                        _logger.LogError(ex,
+                                            "[DeleteTagValueAsync] File.Move failed for asset {AssetId}: {OldPath} -> {SuffixedPath}. Reverting tags.",
+                                            asset.Id, oldFilePath, suffixedPath);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!found)
+                            {
+                                _logger.LogWarning(
+                                    "[DeleteTagValueAsync] Could not find unique suffixed name for asset {AssetId}: {NewPath}. Reverting tags.",
+                                    asset.Id, newFilePath);
+                                // Could not find a unique name — revert in-memory tags to match disk
+                                asset.Tags = originalTags;
+                            }
                         }
                     }
                 }

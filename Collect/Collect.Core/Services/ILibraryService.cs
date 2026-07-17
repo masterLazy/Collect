@@ -68,6 +68,13 @@ public interface ILibraryService
     Task UpdateAssetCountAsync(int count);
 
     /// <summary>
+    /// Apply a mutation to library.json under a file lock.
+    /// The action receives the current LibraryInfo and should mutate it in place.
+    /// The updated info is then written back to disk.
+    /// </summary>
+    Task UpdateLibraryInfoAsync(Action<LibraryInfo> updateAction);
+
+    /// <summary>
     /// Get the custom display order for tag categories, or null if not set.
     /// </summary>
     Task<List<string>?> GetCategoryOrderAsync();

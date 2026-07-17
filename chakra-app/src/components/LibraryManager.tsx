@@ -199,9 +199,9 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
     }
 
     return (
-        <Box position="relative">
-            <Center height="100vh" bg="bg">
-                <VStack gap="6" width="full" maxW="960px" px="4">
+        <Box position="relative" height="100vh" overflow="auto">
+            <Center minH="100vh" bg="bg">
+                <VStack gap="6" width="full" maxW="960px" px="4" py="6">
                     <Box textAlign="center">
                         <Box display="flex" alignItems="center" justifyContent="center" gap="3">
                             <img src="/icon.svg" alt="Collect" style={{ width: 40, height: 40 }} />
@@ -214,7 +214,7 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
                         </Text>
                     </Box>
 
-                    <VStack display={{ base: "flex", md: "none" }} gap="6" width="full" overflow="auto">
+                    <VStack display={{ base: "flex", md: "none" }} gap="6" width="full">
                         {/* Your Libraries */}
                         <Card.Root width="full" variant="outline">
                             <Card.Header pb="3">

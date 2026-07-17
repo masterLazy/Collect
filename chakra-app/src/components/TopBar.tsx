@@ -2,6 +2,7 @@ import { Box, Button, HStack, IconButton, Menu, Popover, Portal, Text } from "@c
 import { useEffect, useRef, useState } from "react"
 import { SearchInput } from "./SearchInput"
 import { TagFilterModal } from "./TagFilterModal"
+import type { CustomToaster } from "./CustomToast"
 
 export type SortMode = "newest" | "name" | "random"
 
@@ -33,6 +34,7 @@ interface TopBarProps {
     onLock?: () => void
     sortMode?: SortMode
     onSortChange?: (mode: SortMode) => void
+    toaster: CustomToaster
 }
 
 function PlusIcon() {
@@ -156,6 +158,7 @@ export function TopBar({
     onLock,
     sortMode = "newest",
     onSortChange,
+    toaster,
 }: TopBarProps) {
     // Mobile search bar visibility:
     // - If alwaysShowSearch is on: use scroll-based fade
@@ -328,8 +331,8 @@ export function TopBar({
                 {currentFolder !== undefined && currentFolder !== "" && (
                     <HStack
                         gap="1"
-                        flex="1"
                         minW="0"
+                        flexShrink="1"
                         fontSize="sm"
                         color="fg.muted"
                     >
@@ -466,6 +469,7 @@ export function TopBar({
                         onTagsChange={onTagsChange}
                         onCategorizeSave={onCategorizeSave}
                         isMobile={isMobile}
+                        toaster={toaster}
                     />
 
                     {/* More menu (desktop & mobile) */}

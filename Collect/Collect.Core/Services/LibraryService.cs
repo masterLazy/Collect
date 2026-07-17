@@ -22,6 +22,7 @@ public class LibraryService : ILibraryService
     };
 
     private readonly IEncryptionService _encryptionService;
+    private readonly SemaphoreSlim _fileLock = new(1, 1);
 
     private string? _libraryPath;
     private readonly ConcurrentDictionary<string, UnlockSession> _sessions = new();
@@ -130,27 +131,35 @@ public class LibraryService : ILibraryService
         if (_libraryPath is null)
             return null;
 
-        var infoPath = Path.Combine(_libraryPath, ".collect", "library.json");
-        if (!File.Exists(infoPath))
-            return null;
-
-        var json = await File.ReadAllTextAsync(infoPath);
-        var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
-
-        if (info is not null)
+        await _fileLock.WaitAsync();
+        try
         {
-            // Count image files on disk (excluding .collect directory)
-            var collectDir = Path.Combine(_libraryPath, ".collect");
-            info.AssetCount = Directory.EnumerateFiles(_libraryPath, "*.*", SearchOption.AllDirectories)
-                .Count(f => !f.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase)
-                    && ImageExtensions.Contains(Path.GetExtension(f)));
+            var infoPath = Path.Combine(_libraryPath, ".collect", "library.json");
+            if (!File.Exists(infoPath))
+                return null;
 
-            // Persist the count back to library.json and the registry
-            await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
-            await RegisterLibraryAsync(info);
+            var json = await File.ReadAllTextAsync(infoPath);
+            var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+
+            if (info is not null)
+            {
+                // Count image files on disk (excluding .collect directory)
+                var collectDir = Path.Combine(_libraryPath, ".collect");
+                info.AssetCount = Directory.EnumerateFiles(_libraryPath, "*.*", SearchOption.AllDirectories)
+                    .Count(f => !f.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase)
+                        && ImageExtensions.Contains(Path.GetExtension(f)));
+
+                // Persist the count back to library.json and the registry
+                await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+                await RegisterLibraryAsync(info);
+            }
+
+            return info;
         }
-
-        return info;
+        finally
+        {
+            _fileLock.Release();
+        }
     }
 
     public string? GetLibraryPath() => _libraryPath;
@@ -173,10 +182,13 @@ public class LibraryService : ILibraryService
         {
             Name = Path.GetFileName(absolutePath),
             Path = relative == "." ? "" : relative,
-            AssetCount = Directory.EnumerateFiles(absolutePath, "*.*", SearchOption.TopDirectoryOnly)
-                .Count(f => ImageExtensions.Contains(Path.GetExtension(f))),
+            AssetCount = 0, // Will be updated after children are built
             Children = new List<DirectoryNode>()
         };
+
+        // Count files directly in this directory (TopDirectoryOnly)
+        var directCount = Directory.EnumerateFiles(absolutePath, "*.*", SearchOption.TopDirectoryOnly)
+            .Count(f => ImageExtensions.Contains(Path.GetExtension(f)));
 
         foreach (var dir in Directory.GetDirectories(absolutePath))
         {
@@ -186,6 +198,9 @@ public class LibraryService : ILibraryService
             var child = BuildDirectoryNode(dir, rootPath, collectDir);
             node.Children.Add(child);
         }
+
+        // AssetCount = direct files + all files in subdirectories (recursive)
+        node.AssetCount = directCount + node.Children.Sum(c => c.AssetCount);
 
         // Sort children: folders with assets first, then alphabetical
         node.Children = node.Children
@@ -437,7 +452,17 @@ public class LibraryService : ILibraryService
         // 1. Check in-memory library first (lightweight read, no side effects)
         if (_libraryPath is not null)
         {
-            var currentInfo = ReadInfoFromPath(_libraryPath);
+            await _fileLock.WaitAsync();
+            LibraryInfo? currentInfo;
+            try
+            {
+                currentInfo = ReadInfoFromPath(_libraryPath);
+            }
+            finally
+            {
+                _fileLock.Release();
+            }
+
             if (currentInfo is not null &&
                 (currentInfo.Id == id || currentInfo.Id.StartsWith(id, StringComparison.OrdinalIgnoreCase)))
             {
@@ -649,52 +674,98 @@ public class LibraryService : ILibraryService
 
     public async Task UpdateAssetCountAsync(int count)
     {
-        var infoPath = GetInfoPath();
-        if (infoPath is null) return;
+        await _fileLock.WaitAsync();
+        try
+        {
+            var infoPath = GetInfoPath();
+            if (infoPath is null) return;
 
-        if (!File.Exists(infoPath))
-            return;
+            if (!File.Exists(infoPath))
+                return;
 
-        var json = await File.ReadAllTextAsync(infoPath);
-        var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
-        if (info is null) return;
+            var json = await File.ReadAllTextAsync(infoPath);
+            var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+            if (info is null) return;
 
-        info.AssetCount = count;
-        await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+            info.AssetCount = count;
+            await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
 
-        // Also update the registry entry
-        await RegisterLibraryAsync(info);
+            // Also update the registry entry
+            await RegisterLibraryAsync(info);
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
     }
 
     public async Task<List<string>?> GetCategoryOrderAsync()
     {
-        var infoPath = GetInfoPath();
-        if (infoPath is null) return null;
+        await _fileLock.WaitAsync();
+        try
+        {
+            var infoPath = GetInfoPath();
+            if (infoPath is null) return null;
 
-        if (!File.Exists(infoPath))
-            return null;
+            if (!File.Exists(infoPath))
+                return null;
 
-        var json = await File.ReadAllTextAsync(infoPath);
-        var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
-        return info?.CategoryOrder;
+            var json = await File.ReadAllTextAsync(infoPath);
+            var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+            return info?.CategoryOrder;
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
     }
 
     public async Task SetCategoryOrderAsync(List<string> order)
     {
-        var infoPath = GetInfoPath();
-        if (infoPath is null)
-            throw new InvalidOperationException("Library not initialized.");
+        await _fileLock.WaitAsync();
+        try
+        {
+            var infoPath = GetInfoPath();
+            if (infoPath is null)
+                throw new InvalidOperationException("Library not initialized.");
 
-        if (!File.Exists(infoPath))
-            throw new InvalidOperationException("Library metadata file not found.");
+            if (!File.Exists(infoPath))
+                throw new InvalidOperationException("Library metadata file not found.");
 
-        var json = await File.ReadAllTextAsync(infoPath);
-        var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
-        if (info is null)
-            throw new InvalidOperationException("Failed to read library metadata.");
+            var json = await File.ReadAllTextAsync(infoPath);
+            var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+            if (info is null)
+                throw new InvalidOperationException("Failed to read library metadata.");
 
-        info.CategoryOrder = order;
-        await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+            info.CategoryOrder = order;
+            await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
+    }
+
+    public async Task UpdateLibraryInfoAsync(Action<LibraryInfo> updateAction)
+    {
+        await _fileLock.WaitAsync();
+        try
+        {
+            var infoPath = GetInfoPath();
+            if (infoPath is null || !File.Exists(infoPath)) return;
+
+            var json = await File.ReadAllTextAsync(infoPath);
+            var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+            if (info is null) return;
+
+            updateAction(info);
+
+            await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
     }
 
     private string? GetInfoPath()

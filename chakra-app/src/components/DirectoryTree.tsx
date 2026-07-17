@@ -460,6 +460,7 @@ function FolderNode({
 export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refreshKey }: DirectoryTreeProps) {
     const [tree, setTree] = useState<DirectoryNodeType | null>(null)
     const [loading, setLoading] = useState(true)
+    const [totalAssetCount, setTotalAssetCount] = useState(0)
     const [createDirOpen, setCreateDirOpen] = useState(false)
     const [newDirName, setNewDirName] = useState("")
     const [creating, setCreating] = useState(false)
@@ -477,6 +478,10 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
             .finally(() => {
                 if (ver === treeVersionRef.current) setLoading(false)
             })
+        // Also fetch library info for total count
+        api.getLibraryInfo().then((info) => {
+            setTotalAssetCount(info.assetCount)
+        }).catch(() => { })
     }, [])
 
     useEffect(() => {
@@ -537,6 +542,11 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
                 <Text fontSize="sm" color={{ _light: "blue.700", _dark: "blue.300" }} truncate flex="1" fontWeight="semibold">
                     All
                 </Text>
+                {totalAssetCount > 0 && (
+                    <Text fontSize="xs" color="fg.subtle" flexShrink="0">
+                        {totalAssetCount}
+                    </Text>
+                )}
             </HStack>
 
             {/* Separator line */}

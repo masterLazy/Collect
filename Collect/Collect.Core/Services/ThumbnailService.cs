@@ -61,6 +61,7 @@ public class ThumbnailService : IThumbnailService
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
+                bool generated;
                 if (encryptionKey is not null)
                 {
                     // Decrypt the source file before decoding
@@ -70,7 +71,7 @@ public class ThumbnailService : IThumbnailService
                     if (original == null)
                         return false;
 
-                    return GenerateAndSaveThumbnail(original, outputPath, maxWidth);
+                    generated = GenerateAndSaveThumbnail(original, outputPath, maxWidth);
                 }
                 else
                 {
@@ -80,8 +81,18 @@ public class ThumbnailService : IThumbnailService
                     if (original == null)
                         return false;
 
-                    return GenerateAndSaveThumbnail(original, outputPath, maxWidth);
+                    generated = GenerateAndSaveThumbnail(original, outputPath, maxWidth);
                 }
+
+                // If the library is encrypted, encrypt the generated thumbnail file in-place
+                if (generated && encryptionKey is not null)
+                {
+                    var plaintext = File.ReadAllBytes(outputPath);
+                    var encrypted = _encryptionService.Encrypt(plaintext, encryptionKey);
+                    File.WriteAllBytes(outputPath, encrypted);
+                }
+
+                return generated;
             }
             catch
             {

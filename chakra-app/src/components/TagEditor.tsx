@@ -238,7 +238,8 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
         setSaving(true)
         try {
             const updated = await api.updateTags(assetId, tags)
-            setInitialTags([...tags])
+            setInitialTags(updated.tags)
+            setDeleteMode(false)
             onTagsSaved?.(updated)
         } catch {
             // Toast handled by parent
@@ -249,6 +250,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
 
     const handleUndo = () => {
         onTagsChange([...initialTags])
+        setDeleteMode(false)
     }
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -395,23 +397,23 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                         </Box>
                     )
                 })}
-                {/* Edit/exit icon to toggle delete mode — always visible at the end */}
-                {tags.length > 0 && (
+                {/* Edit icon to enter delete mode — hidden while in edit mode */}
+                {tags.length > 0 && !deleteMode && (
                     <Box
                         as="button"
-                        onClick={() => setDeleteMode((prev) => !prev)}
+                        onClick={() => setDeleteMode(true)}
                         display="inline-flex"
                         alignItems="center"
                         justifyContent="center"
                         width="6"
                         height="6"
                         borderRadius="md"
-                        color={deleteMode ? { _light: "red.500", _dark: "red.400" } : "fg.subtle"}
-                        opacity={deleteMode ? 1 : 0.5}
+                        color="fg.subtle"
+                        opacity={0.5}
                         _hover={{ opacity: 1, bg: "bg.subtle", cursor: "pointer" }}
-                        aria-label={deleteMode ? "Done editing tags" : "Edit tags"}
+                        aria-label="Edit tags"
                     >
-                        {deleteMode ? <XIcon /> : <EditIcon />}
+                        <EditIcon />
                     </Box>
                 )}
             </HStack>
