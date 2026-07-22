@@ -86,6 +86,7 @@ public class CollectHost
         builder.Services.AddSingleton<IAssetService, AssetService>();
         builder.Services.AddSingleton<ITagService, TagService>();
         builder.Services.AddSingleton<IThumbnailService, ThumbnailService>();
+        builder.Services.AddHttpContextAccessor();
 
         // Register the log collector as both ILoggerProvider and ILogCollector
         builder.Services.AddSingleton<LogCollector>(_logCollector);
@@ -113,6 +114,7 @@ public class CollectHost
 
         // ── Middleware ─────────────────────────────────────────
         app.UseMiddleware<Middleware.ErrorHandlingMiddleware>();
+        app.UseMiddleware<Middleware.LibraryContextMiddleware>();
 
         // CORS (must be before static files and controllers)
         app.UseCors();

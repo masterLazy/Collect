@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using Collect.Core.Models;
+using Microsoft.AspNetCore.Http;
 
 namespace Collect.Core.Services;
 
@@ -22,18 +23,19 @@ public class LibraryService : ILibraryService
     };
 
     private readonly IEncryptionService _encryptionService;
+    private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly SemaphoreSlim _fileLock = new(1, 1);
 
-    private string? _libraryPath;
     private readonly ConcurrentDictionary<string, UnlockSession> _sessions = new();
     // All keys ever created — never cleared, used for repair decryption
     private readonly List<byte[]> _allSessionKeys = new();
 
     private record UnlockSession(byte[] EncryptionKey, DateTime UnlockedAt);
 
-    public LibraryService(IEncryptionService encryptionService)
+    public LibraryService(IEncryptionService encryptionService, IHttpContextAccessor httpContextAccessor)
     {
         _encryptionService = encryptionService;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     public async Task<LibraryInfo> InitializeAsync(string path, string? name = null, string? password = null)
@@ -61,7 +63,6 @@ public class LibraryService : ILibraryService
                     existingInfo.Id = Guid.NewGuid().ToString("N");
                     await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(existingInfo, JsonOptions));
                 }
-                _libraryPath = path;
                 // Clear sessions when switching to a non-encrypted library
                 if (!existingInfo.IsEncrypted)
                     _sessions.Clear();
@@ -97,8 +98,6 @@ public class LibraryService : ILibraryService
 
         await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
 
-        _libraryPath = path;
-
         // Register this library
         await RegisterLibraryAsync(info);
         return info;
@@ -128,29 +127,31 @@ public class LibraryService : ILibraryService
 
     public async Task<LibraryInfo?> GetInfoAsync()
     {
-        if (_libraryPath is null)
+        var path = GetLibraryPath();
+        if (path is null)
             return null;
 
         await _fileLock.WaitAsync();
         try
         {
-            var infoPath = Path.Combine(_libraryPath, ".collect", "library.json");
+            var infoPath = Path.Combine(path, ".collect", "library.json");
             if (!File.Exists(infoPath))
                 return null;
 
-            var json = await File.ReadAllTextAsync(infoPath);
+            var json = await RetryFileOperationAsync(() => File.ReadAllTextAsync(infoPath));
             var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
 
             if (info is not null)
             {
                 // Count image files on disk (excluding .collect directory)
-                var collectDir = Path.Combine(_libraryPath, ".collect");
-                info.AssetCount = Directory.EnumerateFiles(_libraryPath, "*.*", SearchOption.AllDirectories)
+                var collectDir = Path.Combine(path, ".collect");
+                info.AssetCount = Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories)
                     .Count(f => !f.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase)
                         && ImageExtensions.Contains(Path.GetExtension(f)));
 
                 // Persist the count back to library.json and the registry
-                await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+                await RetryFileOperationAsync(() =>
+                    File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions)));
                 await RegisterLibraryAsync(info);
             }
 
@@ -162,16 +163,66 @@ public class LibraryService : ILibraryService
         }
     }
 
-    public string? GetLibraryPath() => _libraryPath;
+    public string? GetLibraryPath()
+    {
+        return _httpContextAccessor.HttpContext?.Items["LibraryPath"] as string;
+    }
+
+    public string? GetLibraryId()
+    {
+        var path = GetLibraryPath();
+        if (path is null) return null;
+
+        var infoPath = Path.Combine(path, ".collect", "library.json");
+        if (!File.Exists(infoPath)) return null;
+
+        try
+        {
+            var json = File.ReadAllText(infoPath);
+            var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+            return info?.Id;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public async Task<string?> GetPathByIdAsync(string id)
+    {
+        var libraries = await GetLibrariesAsync();
+        var entry = FindLibraryById(libraries, id);
+        return entry?.Path;
+    }
+
+    public string? GetPathById(string id)
+    {
+        var path = LibrariesRegistryPath;
+        if (!File.Exists(path))
+            return null;
+        try
+        {
+            var json = File.ReadAllText(path);
+            var libraries = JsonSerializer.Deserialize<List<LibraryInfo>>(json, JsonOptions);
+            if (libraries is null) return null;
+            var entry = FindLibraryById(libraries, id);
+            return entry?.Path;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     public Task<DirectoryNode> GetDirectoryTreeAsync()
     {
-        if (_libraryPath is null)
+        var path = GetLibraryPath();
+        if (path is null)
             return Task.FromResult(new DirectoryNode());
 
-        var collectDir = Path.Combine(_libraryPath, ".collect");
+        var collectDir = Path.Combine(path, ".collect");
 
-        var root = BuildDirectoryNode(_libraryPath, _libraryPath, collectDir);
+        var root = BuildDirectoryNode(path, path, collectDir);
         return Task.FromResult(root);
     }
 
@@ -213,7 +264,8 @@ public class LibraryService : ILibraryService
 
     public Task<string> CreateDirectoryAsync(string relativePath)
     {
-        if (_libraryPath is null)
+        var path = GetLibraryPath();
+        if (path is null)
             throw new InvalidOperationException("Library not initialized.");
 
         // Validate path doesn't contain .. or start with .collect
@@ -224,7 +276,7 @@ public class LibraryService : ILibraryService
             relativePath.Split('/', '\\').First().Equals(".collect", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Cannot create directory under .collect.");
 
-        var fullPath = Path.Combine(_libraryPath, relativePath);
+        var fullPath = Path.Combine(path, relativePath);
         Directory.CreateDirectory(fullPath);
 
         var result = relativePath.Replace('\\', '/');
@@ -233,7 +285,8 @@ public class LibraryService : ILibraryService
 
     public Task<string> RenameDirectoryAsync(string oldRelativePath, string newName)
     {
-        if (_libraryPath is null)
+        var path = GetLibraryPath();
+        if (path is null)
             throw new InvalidOperationException("Library not initialized.");
 
         // Validate no .. or .collect
@@ -245,7 +298,7 @@ public class LibraryService : ILibraryService
             oldRelativePath.Split('/', '\\').First().Equals(".collect", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Cannot rename .collect directory.");
 
-        var oldFullPath = Path.Combine(_libraryPath, oldRelativePath);
+        var oldFullPath = Path.Combine(path, oldRelativePath);
 
         if (!Directory.Exists(oldFullPath))
             throw new DirectoryNotFoundException($"Directory not found: {oldRelativePath}");
@@ -268,7 +321,8 @@ public class LibraryService : ILibraryService
 
     public Task<bool> DeleteDirectoryAsync(string relativePath)
     {
-        if (_libraryPath is null)
+        var path = GetLibraryPath();
+        if (path is null)
             throw new InvalidOperationException("Library not initialized.");
 
         // Validate no .. or .collect
@@ -282,7 +336,7 @@ public class LibraryService : ILibraryService
             relativePath.Split('/', '\\').First().Equals(".collect", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Cannot delete .collect directory.");
 
-        var fullPath = Path.Combine(_libraryPath, relativePath);
+        var fullPath = Path.Combine(path, relativePath);
 
         if (!Directory.Exists(fullPath))
             return Task.FromResult(false);
@@ -449,50 +503,16 @@ public class LibraryService : ILibraryService
 
     public async Task<LibraryInfo?> LoadByIdAsync(string id)
     {
-        // 1. Check in-memory library first (lightweight read, no side effects)
-        if (_libraryPath is not null)
-        {
-            await _fileLock.WaitAsync();
-            LibraryInfo? currentInfo;
-            try
-            {
-                currentInfo = ReadInfoFromPath(_libraryPath);
-            }
-            finally
-            {
-                _fileLock.Release();
-            }
-
-            if (currentInfo is not null &&
-                (currentInfo.Id == id || currentInfo.Id.StartsWith(id, StringComparison.OrdinalIgnoreCase)))
-            {
-                // If encrypted and no valid session, clear sessions
-                if (currentInfo.IsEncrypted)
-                {
-                    if (!IsLibraryUnlocked())
-                        _sessions.Clear();
-                }
-                else
-                {
-                    _sessions.Clear();
-                }
-
-                return currentInfo;
-            }
-        }
-
-        // 2. Fall back to registry lookup
+        // 1. Check registry first
         var libraries = await GetLibrariesAsync();
         var entry = FindLibraryById(libraries, id);
         if (entry is null)
             return null;
 
-        // 3. Set in-memory path and return lightweight info
-        _libraryPath = entry.Path;
-
+        // 2. Read full info from library.json
         var info = ReadInfoFromPath(entry.Path) ?? entry;
 
-        // If encrypted within 10-min window, keep the key; otherwise clear it
+        // 3. Handle session state for encrypted libraries
         if (info.IsEncrypted)
         {
             if (!IsLibraryUnlocked())
@@ -573,7 +593,8 @@ public class LibraryService : ILibraryService
     /// </summary>
     public bool IsEncryptedLibrary()
     {
-        var info = ReadInfoFromPath(_libraryPath ?? "");
+        var path = GetLibraryPath();
+        var info = ReadInfoFromPath(path ?? "");
         return info?.IsEncrypted ?? false;
     }
 
@@ -669,7 +690,56 @@ public class LibraryService : ILibraryService
             libraries.Add(info);
         }
 
-        await File.WriteAllTextAsync(filePath, JsonSerializer.Serialize(libraries, JsonOptions));
+        await RetryFileOperationAsync(() =>
+            File.WriteAllTextAsync(filePath, JsonSerializer.Serialize(libraries, JsonOptions)));
+    }
+
+    /// <summary>
+    /// Retry an async file I/O operation up to <paramref name="maxRetries"/> times
+    /// with a <paramref name="delayMs"/> pause between attempts.
+    /// Only catches <see cref="IOException"/> to handle transient file-lock conflicts.
+    /// </summary>
+    private static async Task<T> RetryFileOperationAsync<T>(Func<Task<T>> operation, int maxRetries = 3, int delayMs = 200)
+    {
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (IOException) when (attempt < maxRetries)
+            {
+                if (attempt < maxRetries)
+                    await Task.Delay(delayMs);
+            }
+        }
+
+        // Should never reach here — last attempt throws naturally
+        return await operation();
+    }
+
+    /// <summary>
+    /// Retry an async file I/O operation up to <paramref name="maxRetries"/> times
+    /// (overload for <see cref="Task"/>-returning operations).
+    /// </summary>
+    private static async Task RetryFileOperationAsync(Func<Task> operation, int maxRetries = 3, int delayMs = 200)
+    {
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                await operation();
+                return;
+            }
+            catch (IOException) when (attempt < maxRetries)
+            {
+                if (attempt < maxRetries)
+                    await Task.Delay(delayMs);
+            }
+        }
+
+        // Should never reach here — last attempt throws naturally
+        await operation();
     }
 
     public async Task UpdateAssetCountAsync(int count)
@@ -770,8 +840,9 @@ public class LibraryService : ILibraryService
 
     private string? GetInfoPath()
     {
-        if (_libraryPath is null) return null;
-        return Path.Combine(_libraryPath, ".collect", "library.json");
+        var path = GetLibraryPath();
+        if (path is null) return null;
+        return Path.Combine(path, ".collect", "library.json");
     }
 
     // ──────────────────────────────────────────────

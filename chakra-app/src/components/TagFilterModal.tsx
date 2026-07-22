@@ -25,6 +25,7 @@ interface TagFilterModalProps {
     onCategorizeSave?: () => void
     isMobile?: boolean
     toaster: CustomToaster
+    libraryId?: string
 }
 
 function FilterIcon() {
@@ -285,7 +286,7 @@ const TagsPanel = memo(function TagsPanel({
     )
 })
 
-export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, isMobile, toaster }: TagFilterModalProps) {
+export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, isMobile, toaster, libraryId }: TagFilterModalProps) {
     const [open, setOpen] = useState(false)
     const [tagData, setTagData] = useState<TagGroupsResponse | null>(null)
     const [searchTerm, setSearchTerm] = useState("")
@@ -344,7 +345,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
     const loadTags = useCallback(async (page: number, search: string, append: boolean) => {
         setLoadingMore(true)
         try {
-            const result = await api.getTags(page, PAGE_SIZE, search || undefined)
+            const result = await api.getTags(libraryId ?? "", page, PAGE_SIZE, search || undefined)
             if (append && tagDataRef.current) {
                 const current = tagDataRef.current
                 const merged = [...current.groups]
@@ -380,7 +381,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
             setCategoryOrder([])
             loadTags(1, "", false)
             // Load category order from library info
-            api.getLibraryInfo().then((info) => {
+            api.getLibraryInfo(libraryId ?? "").then((info) => {
                 if (info.categoryOrder) {
                     setCategoryOrder(info.categoryOrder)
                 }
@@ -518,13 +519,13 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
             const renameEntries: [string, string][] = []
             pendingCategoryRenames.forEach((v, k) => renameEntries.push([k, v]))
             for (let i = 0; i < renameEntries.length; i++) {
-                await api.renameCategory(renameEntries[i][0], renameEntries[i][1])
+                await api.renameCategory(libraryId ?? "", renameEntries[i][0], renameEntries[i][1])
             }
             // 2. Apply category deletes
             const deleteEntries: string[] = []
             pendingCategoryDeletes.forEach((v) => deleteEntries.push(v))
             for (let i = 0; i < deleteEntries.length; i++) {
-                await api.deleteCategory(deleteEntries[i])
+                await api.deleteCategory(libraryId ?? "", deleteEntries[i])
             }
             // 3. Apply individual tag categorization changes
             if (pendingChanges.size > 0) {
@@ -532,7 +533,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
                     tagValue,
                     newType,
                 }))
-                await api.categorizeTags(changes)
+                await api.categorizeTags(libraryId ?? "", changes)
             }
 
             // 4. Update category order: replace renamed categories, remove deleted ones
@@ -545,7 +546,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
             }
             updatedOrder = updatedOrder.filter((name) => !pendingCategoryDeletes.has(name))
             if (updatedOrder.length > 0) {
-                await api.saveCategoryOrder(updatedOrder)
+                await api.saveCategoryOrder(libraryId ?? "", updatedOrder)
             }
             setCategoryOrder(updatedOrder)
 
@@ -622,7 +623,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
                 const [moved] = newOrder.splice(dragIndex, 1)
                 newOrder.splice(dropIndex, 0, moved)
                 setCategoryOrder(newOrder)
-                api.saveCategoryOrder(newOrder).catch(() => { })
+                api.saveCategoryOrder(libraryId ?? "", newOrder).catch(() => { })
                 // Re-sort the tag groups to match the new order immediately
                 setTagData((prev) => {
                     if (!prev) return prev
@@ -803,7 +804,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
         if (!oldValue || !newValue) return
         setRenameTagSaving(true)
         try {
-            await api.renameTag(oldValue, newValue)
+            await api.renameTag(libraryId ?? "", oldValue, newValue)
             toaster.create({ title: `Tag "${oldValue}" renamed to "${newValue}"`, type: "success" })
             setConfirmRenameOpen(false)
             setRenameTagDialogOpen(false)
@@ -832,7 +833,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
         try {
             const deleted = Array.from(selectedDeleteTags)
             for (const tagValue of deleted) {
-                await api.deleteTag(tagValue)
+                await api.deleteTag(libraryId ?? "", tagValue)
             }
             toaster.create({ title: `Deleted ${deleted.length} tag(s)`, type: "success" })
             setConfirmDeleteOpen(false)
@@ -1184,6 +1185,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
                                                         multiSelect={true}
                                                         selectedTags={selectedCreateTags}
                                                         onToggleTag={handleToggleCreateTag}
+                                                        libraryId={libraryId!}
                                                     />
                                                 </Box>
                                                 <Field.Root>
@@ -1315,6 +1317,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
                                                         multiSelect={false}
                                                         selectedTags={selectedRenameTag}
                                                         onToggleTag={handleRenameTagSelect}
+                                                        libraryId={libraryId!}
                                                     />
                                                 </Box>
                                                 <Field.Root>
@@ -1419,6 +1422,7 @@ export function TagFilterModal({ selectedTags, onTagsChange, onCategorizeSave, i
                                                         multiSelect={true}
                                                         selectedTags={selectedDeleteTags}
                                                         onToggleTag={handleDeleteTagToggle}
+                                                        libraryId={libraryId!}
                                                     />
                                                 </Box>
                                                 <Box>

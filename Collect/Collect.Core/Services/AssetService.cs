@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Collect.Core.Dtos;
 using Collect.Core.Models;
 using SkiaSharp;
+using static Collect.Core.Services.ContentFingerprint;
 
 namespace Collect.Core.Services;
 
@@ -109,11 +110,15 @@ public partial class AssetService : IAssetService
         await _semaphore.WaitAsync();
         try
         {
+            // Load previous manifest for add/removed tracking
+            var previousManifest = AssetsManifest.Load(libraryPath);
+            var previousIds = new HashSet<string>(previousManifest.AssetIds, StringComparer.OrdinalIgnoreCase);
+
             var newAssets = new List<Asset>();
             var added = 0;
             var scannedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var scannedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            // Recursively find image files
             var files = Directory.EnumerateFiles(libraryPath, "*.*", SearchOption.AllDirectories)
                 .Where(f => !f.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase)
                     && ImageExtensions.Contains(Path.GetExtension(f)));
@@ -128,7 +133,6 @@ public partial class AssetService : IAssetService
 
                 if (existing is not null)
                 {
-                    // Update metadata if file has been modified
                     var lastWrite = File.GetLastWriteTimeUtc(filePath);
                     if (existing.LastModified is null || existing.LastModified.Value != lastWrite)
                     {
@@ -136,15 +140,15 @@ public partial class AssetService : IAssetService
                         existing.LastModified = lastWrite;
                     }
                     newAssets.Add(existing);
+                    scannedIds.Add(existing.Id);
                 }
                 else
                 {
-                    // New asset
                     var (asset, wasEncrypted) = CreateAssetFromFile(filePath, relativePath);
                     newAssets.Add(asset);
+                    scannedIds.Add(asset.Id);
                     added++;
 
-                    // Only encrypt if the library is encrypted AND the file is not already encrypted
                     byte[]? encryptionKey = null;
                     if (_libraryService.IsEncryptedLibrary() && !wasEncrypted)
                     {
@@ -155,25 +159,26 @@ public partial class AssetService : IAssetService
                         }
                     }
 
-                    // Generate thumbnail for new asset (deduplicated by content hash)
-                    _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, filePath, encryptionKey);
+                    // LAZY: No longer generate thumbnails during scan.
+                    // Thumbnails are generated on-demand when the frontend requests them.
                 }
             }
 
-            var removed = _assets.Count(a => !scannedPaths.Contains(a.RelativePath));
+            var removed = previousIds.Count > 0
+                ? previousIds.Count(id => !scannedIds.Contains(id))
+                : _assets.Count(a => !scannedPaths.Contains(a.RelativePath));
+
             _assets = newAssets;
 
-            // Clean up orphaned thumbnails (from renamed/deleted files)
-            var currentFilePaths = _assets.Select(a => Path.Combine(libraryPath, a.RelativePath)).ToList();
-            _thumbnailService.CleanupOrphanedThumbnails(libraryPath, currentFilePaths);
+            // Save updated manifest
+            var manifest = new AssetsManifest { AssetIds = scannedIds.ToList() };
+            manifest.Save(libraryPath);
 
-            // ──────────────────────────────────────────────
-            //  Tag normalization: auto-add type prefix for tags
-            //  that exist both with and without a type
-            // ──────────────────────────────────────────────
+            // Clean up orphaned thumbnails using asset IDs from manifest
+            _thumbnailService.CleanupOrphanedThumbnails(libraryPath, scannedIds);
+
             var tagConflicts = await NormalizeTagsAsync();
 
-            // Update AssetCount in library.json
             await _libraryService.UpdateAssetCountAsync(_assets.Count);
 
             return new ScanResult
@@ -190,45 +195,95 @@ public partial class AssetService : IAssetService
         }
     }
 
-    /// <summary>
-    /// Create an asset from a file on disk.
-    /// Returns the asset and a bool indicating whether the file was already encrypted.
-    /// </summary>
     private (Asset Asset, bool WasEncrypted) CreateAssetFromFile(string filePath, string relativePath)
     {
         var fileInfo = new FileInfo(filePath);
         var nameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
 
+        string id;
+        int width = 0, height = 0;
+        bool wasEncrypted = false;
+
+        var encryptionKey = _libraryService.GetEncryptionKey();
+        if (encryptionKey is not null)
+        {
+            try
+            {
+                // Decrypt once, use for both fingerprint and dimension extraction
+                var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
+                id = ContentFingerprint.Compute(decrypted, fileInfo.Length);
+
+                using var decryptedStream = new MemoryStream(decrypted);
+                using var codec = SKCodec.Create(decryptedStream);
+                if (codec != null)
+                {
+                    width = codec.Info.Width;
+                    height = codec.Info.Height;
+                }
+                wasEncrypted = true;
+            }
+            catch (AuthenticationTagMismatchException)
+            {
+                // File not yet encrypted — fall through to plaintext
+                id = ContentFingerprint.Compute(filePath);
+                ExtractDimensionsPlaintext(filePath, out width, out height);
+            }
+        }
+        else
+        {
+            id = ContentFingerprint.Compute(filePath);
+            ExtractDimensionsPlaintext(filePath, out width, out height);
+        }
+
         var asset = new Asset
         {
-            Id = Guid.NewGuid().ToString("N"),
+            Id = id,
             FileName = fileInfo.Name,
             RelativePath = relativePath,
             FileSize = fileInfo.Length,
+            Width = width,
+            Height = height,
             MimeType = GetMimeType(filePath),
             ImportedAt = DateTime.UtcNow,
             LastModified = fileInfo.LastWriteTimeUtc,
             Tags = ParseTags(nameWithoutExt)
         };
 
-        // Try to get image dimensions using SkiaSharp
-        var wasEncrypted = TryExtractDimensions(filePath, asset);
-
         return (asset, wasEncrypted);
     }
 
     /// <summary>
-    /// Read an image file (possibly encrypted) and extract dimensions into the asset.
-    /// If the library is encrypted and unlocked, attempts to decrypt first.
-    /// Falls back to plaintext read if decryption fails (file may not yet be encrypted).
-    /// Returns true if the file was already encrypted (decryption succeeded).
+    /// Extract image dimensions from a plaintext file (no decryption).
     /// </summary>
-    private bool TryExtractDimensions(string filePath, Asset asset)
+    private static void ExtractDimensionsPlaintext(string filePath, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+        try
+        {
+            using var input = File.OpenRead(filePath);
+            using var codec = SKCodec.Create(input);
+            if (codec != null)
+            {
+                width = codec.Info.Width;
+                height = codec.Info.Height;
+            }
+        }
+        catch
+        {
+            // Non-image or corrupt file — dimensions stay 0
+        }
+    }
+
+    /// <summary>
+    /// Read an image file (possibly encrypted) and extract dimensions into the asset.
+    /// Falls back to plaintext read if decryption fails (file may not yet be encrypted).
+    /// </summary>
+    private void UpdateDimensionsFromEncrypted(string filePath, Asset asset)
     {
         var encryptionKey = _libraryService.GetEncryptionKey();
         if (encryptionKey is not null)
         {
-            // Try decrypted read first (file is encrypted from a previous session)
             try
             {
                 var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
@@ -236,40 +291,25 @@ public partial class AssetService : IAssetService
                 using var codec = SKCodec.Create(decryptedStream);
                 if (codec != null)
                 {
-                    var info = codec.Info;
-                    asset.Width = info.Width;
-                    asset.Height = info.Height;
+                    asset.Width = codec.Info.Width;
+                    asset.Height = codec.Info.Height;
                 }
-                return true; // file was already encrypted
+                return; // Successfully read encrypted
             }
             catch (AuthenticationTagMismatchException)
             {
-                // File is not yet encrypted (first scan of new encrypted library) —
-                // fall through to plaintext read
+                // File not yet encrypted — fall through to plaintext
             }
             catch
             {
-                // Other errors — fall through to plaintext read
+                // Other errors — fall through to plaintext
             }
         }
 
-        // Plaintext read (library not encrypted, or file not yet encrypted)
-        try
-        {
-            using var input = File.OpenRead(filePath);
-            using var codec = SKCodec.Create(input);
-            if (codec != null)
-            {
-                var info = codec.Info;
-                asset.Width = info.Width;
-                asset.Height = info.Height;
-            }
-        }
-        catch
-        {
-            // Non-image or corrupt file — dimensions stay 0
-        }
-        return false; // file was not encrypted
+        // Plaintext fallback
+        ExtractDimensionsPlaintext(filePath, out var w, out var h);
+        asset.Width = w;
+        asset.Height = h;
     }
 
     /// <summary>
@@ -324,9 +364,7 @@ public partial class AssetService : IAssetService
         asset.FileSize = fileInfo.Length;
         asset.RelativePath = relativePath;
         asset.LastModified = fileInfo.LastWriteTimeUtc;
-
-        // Try to get image dimensions using SkiaSharp (decrypts if needed)
-        TryExtractDimensions(filePath, asset);
+        UpdateDimensionsFromEncrypted(filePath, asset);
     }
 
     // ──────────────────────────────────────────────
@@ -454,7 +492,7 @@ public partial class AssetService : IAssetService
                 else if (!File.Exists(newFilePath))
                 {
                     // No collision, rename directly
-                    _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                    _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                     if (!TryMoveWithRetry(oldFilePath, newFilePath))
                         return false;
                     asset.FileName = newFileName;
@@ -472,7 +510,7 @@ public partial class AssetService : IAssetService
                         var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
                         if (!File.Exists(suffixedPath))
                         {
-                            try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                            try { _thumbnailService.DeleteThumbnail(libraryPath, asset.Id); } catch { }
                             if (TryMoveWithRetry(oldFilePath, suffixedPath))
                             {
                                 asset.FileName = suffixedName;
@@ -800,7 +838,7 @@ public partial class AssetService : IAssetService
                         {
                             if (!File.Exists(newPath))
                             {
-                                _thumbnailService.DeleteThumbnail(libraryPath, destPath);
+                                _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                                 File.Move(destPath, newPath);
                                 destPath = newPath;
                                 var newRelativePath = Path.GetRelativePath(libraryPath, destPath);
@@ -817,7 +855,7 @@ public partial class AssetService : IAssetService
                                     var suffixedPath = Path.Combine(oldDir, suffixedName);
                                     if (!File.Exists(suffixedPath))
                                     {
-                                        _thumbnailService.DeleteThumbnail(libraryPath, destPath);
+                                        _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                                         File.Move(destPath, suffixedPath);
                                         destPath = suffixedPath;
                                         var newRelativePath = Path.GetRelativePath(libraryPath, destPath);
@@ -831,8 +869,7 @@ public partial class AssetService : IAssetService
                         asset.Tags = orderedTags;
                     }
 
-                    // Generate thumbnail (deduplicated by content hash)
-                    _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, destPath, encryptionKey);
+                    // LAZY: Thumbnails generated on-demand when the frontend requests them.
                 }
                 catch (Exception ex)
                 {
@@ -904,7 +941,7 @@ public partial class AssetService : IAssetService
                 Directory.CreateDirectory(targetFullDir);
 
             // Delete old thumbnail before moving
-            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+            _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
 
             // Move file on disk
             File.Move(oldFilePath, newFilePath);
@@ -944,7 +981,7 @@ public partial class AssetService : IAssetService
             // Delete the thumbnail (best effort)
             try
             {
-                _thumbnailService.DeleteThumbnail(libraryPath, sourcePath);
+                _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
             }
             catch (Exception ex)
             {
@@ -1069,7 +1106,7 @@ public partial class AssetService : IAssetService
             return null;
 
         var encryptionKey = _libraryService.GetEncryptionKey();
-        return _thumbnailService.GetOrCreateContentHashThumbnail(libraryPath, sourcePath, encryptionKey);
+        return _thumbnailService.GetOrCreateThumbnail(libraryPath, sourcePath, asset.Id, encryptionKey);
     }
 
     // ──────────────────────────────────────────────
@@ -1160,7 +1197,7 @@ public partial class AssetService : IAssetService
                         // No collision, rename directly
                         try
                         {
-                            _thumbnailService.DeleteThumbnail(libraryPathForRename, oldFilePath);
+                            _thumbnailService.DeleteThumbnail(libraryPathForRename, asset.Id);
                         }
                         catch (Exception ex)
                         {
@@ -1198,7 +1235,7 @@ public partial class AssetService : IAssetService
                             var suffixedPath = Path.Combine(libraryPathForRename, suffixedRelPath);
                             if (!File.Exists(suffixedPath))
                             {
-                                try { _thumbnailService.DeleteThumbnail(libraryPathForRename, oldFilePath); } catch { }
+                                try { _thumbnailService.DeleteThumbnail(libraryPathForRename, asset.Id); } catch { }
                                 try
                                 {
                                     File.Move(oldFilePath, suffixedPath);
@@ -1276,6 +1313,8 @@ public partial class AssetService : IAssetService
 
     private AssetDto MapToDto(Asset asset)
     {
+        var libraryId = _libraryService.GetLibraryId();
+        var query = libraryId is not null ? $"?libraryId={libraryId}" : "";
         return new AssetDto
         {
             Id = asset.Id,
@@ -1284,7 +1323,7 @@ public partial class AssetService : IAssetService
             FileSize = asset.FileSize,
             Width = asset.Width,
             Height = asset.Height,
-            ThumbnailUrl = $"/api/assets/{asset.Id}/thumbnail",
+            ThumbnailUrl = $"/api/assets/{asset.Id}/thumbnail{query}",
             ImportedAt = asset.ImportedAt,
             LastModified = asset.LastModified
         };
@@ -1292,6 +1331,8 @@ public partial class AssetService : IAssetService
 
     private AssetDetailDto MapToDetailDto(Asset asset)
     {
+        var libraryId = _libraryService.GetLibraryId();
+        var query = libraryId is not null ? $"?libraryId={libraryId}" : "";
         return new AssetDetailDto
         {
             Id = asset.Id,
@@ -1302,8 +1343,8 @@ public partial class AssetService : IAssetService
             Height = asset.Height,
             MimeType = asset.MimeType,
             Tags = asset.Tags,
-            ThumbnailUrl = $"/api/assets/{asset.Id}/thumbnail",
-            ImageUrl = $"/api/assets/{asset.Id}/image",
+            ThumbnailUrl = $"/api/assets/{asset.Id}/thumbnail{query}",
+            ImageUrl = $"/api/assets/{asset.Id}/image{query}",
             ImportedAt = asset.ImportedAt,
             LastModified = asset.LastModified
         };
@@ -1406,7 +1447,7 @@ public partial class AssetService : IAssetService
                                 // No collision, rename directly
                                 try
                                 {
-                                    _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                                    _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                                 }
                                 catch (Exception ex)
                                 {
@@ -1444,7 +1485,7 @@ public partial class AssetService : IAssetService
                                     var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
                                     if (!File.Exists(suffixedPath))
                                     {
-                                        try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                                        try { _thumbnailService.DeleteThumbnail(libraryPath, asset.Id); } catch { }
                                         try
                                         {
                                             File.Move(oldFilePath, suffixedPath);
@@ -1553,7 +1594,7 @@ public partial class AssetService : IAssetService
                                 // No collision, rename directly
                                 try
                                 {
-                                    _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                                    _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                                 }
                                 catch (Exception ex)
                                 {
@@ -1591,7 +1632,7 @@ public partial class AssetService : IAssetService
                                     var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
                                     if (!File.Exists(suffixedPath))
                                     {
-                                        try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                                        try { _thumbnailService.DeleteThumbnail(libraryPath, asset.Id); } catch { }
                                         try
                                         {
                                             File.Move(oldFilePath, suffixedPath);
@@ -1686,7 +1727,7 @@ public partial class AssetService : IAssetService
                     {
                         if (!File.Exists(newFilePath))
                         {
-                            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                            _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                             File.Move(oldFilePath, newFilePath);
                             asset.FileName = newFileName;
                             asset.RelativePath = newRelativePath;
@@ -1769,7 +1810,7 @@ public partial class AssetService : IAssetService
                     {
                         if (!File.Exists(newFilePath))
                         {
-                            _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                            _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                             File.Move(oldFilePath, newFilePath);
                             asset.FileName = newFileName;
                             asset.RelativePath = newRelativePath;
@@ -1856,7 +1897,7 @@ public partial class AssetService : IAssetService
                             // No collision, rename directly
                             try
                             {
-                                _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                                _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                             }
                             catch (Exception ex)
                             {
@@ -1894,7 +1935,7 @@ public partial class AssetService : IAssetService
                                 var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
                                 if (!File.Exists(suffixedPath))
                                 {
-                                    try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                                    try { _thumbnailService.DeleteThumbnail(libraryPath, asset.Id); } catch { }
                                     try
                                     {
                                         File.Move(oldFilePath, suffixedPath);
@@ -2167,7 +2208,7 @@ public partial class AssetService : IAssetService
                             // No collision, rename directly
                             try
                             {
-                                _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath);
+                                _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                             }
                             catch (Exception ex)
                             {
@@ -2205,7 +2246,7 @@ public partial class AssetService : IAssetService
                                 var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
                                 if (!File.Exists(suffixedPath))
                                 {
-                                    try { _thumbnailService.DeleteThumbnail(libraryPath, oldFilePath); } catch { }
+                                    try { _thumbnailService.DeleteThumbnail(libraryPath, asset.Id); } catch { }
                                     try
                                     {
                                         File.Move(oldFilePath, suffixedPath);

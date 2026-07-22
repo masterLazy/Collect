@@ -62,7 +62,7 @@ export function ImageViewerPage() {
             setLoading(false)
             return
         }
-        api.getAsset(assetId)
+        api.getAsset(assetId, libraryId!)
             .then((data) => {
                 setAsset(data)
             })
@@ -242,7 +242,7 @@ export function ImageViewerPage() {
                         {isFit ? (
                             <Image
                                 ref={imageRef}
-                                src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset.lastModified ?? "")}
+                                src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset.lastModified ?? "") + "&libraryId=" + encodeURIComponent(libraryId!)}
                                 alt={asset.fileName}
                                 maxWidth="95%"
                                 maxHeight="calc(100vh - 100px)"
@@ -263,7 +263,7 @@ export function ImageViewerPage() {
                             >
                                 <Image
                                     ref={imageRef}
-                                    src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset.lastModified ?? "")}
+                                    src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset.lastModified ?? "") + "&libraryId=" + encodeURIComponent(libraryId!)}
                                     alt={asset.fileName}
                                     opacity={imageLoaded ? 1 : 0}
                                     transition="opacity 0.3s"

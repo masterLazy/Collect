@@ -44,10 +44,10 @@ npm start
 | `IAssetService` | `AssetService` | CRUD, scan/reconcile, tag parsing, search, thumbnail paths, clipboard image, move, rename, categorize, conflict resolution, upload, encryption workflows |
 | `ILibraryService` | `LibraryService` | Library init/metadata, directory tree CRUD, recent libraries, registry persistence, encryption state, category order |
 | `ITagService` | `TagService` | Aggregates tags from all assets and returns paginated grouped responses |
-| `IThumbnailService` | `ThumbnailService` | WebP thumbnail generation (400px max width, quality 85), content-hash deduplication via MD5(path + size + last-write-time), orphan cleanup |
+| `IThumbnailService` | `ThumbnailService` | WebP thumbnail generation (400px max width, quality 85), keyed by asset ID (`{assetId}.webp`), lazy on-demand generation, orphan cleanup |
 | `IEncryptionService` | `EncryptionService` | AES-256-GCM encryption/decryption helpers for library files |
 
-**Key**: All services are **Singleton**. `AssetService` holds an in-memory `List<Asset>` and relies on a scan-based model rather than a database. Concurrency is guarded by `SemaphoreSlim(1, 1)`.
+**Key**: All services are **Singleton**. `IHttpContextAccessor` is registered via `AddHttpContextAccessor()` (also Singleton). `LibraryService` depends on `IHttpContextAccessor` to resolve the current library path per-request rather than using a global singleton state. `AssetService` holds an in-memory `List<Asset>` and relies on a scan-based model rather than a database. Concurrency is guarded by `SemaphoreSlim(1, 1)`.
 
 ### Controllers & Route Prefixes
 
@@ -83,7 +83,7 @@ Library Root/
 └── .collect/
     ├── library.json                ← LibraryInfo metadata (persisted by LibraryService)
     └── thumbnails/
-        └── <md5hash>.webp          ← SkiaSharp thumbnails (400px max width)
+        └── <assetId>.webp          ← SkiaSharp thumbnails (400px max width, named by asset content-fingerprint ID)
 ```
 
 ### Tag Naming Convention and File-Name-Driven Tag Model
@@ -153,16 +153,68 @@ The frontend search bar and sidebar tag editor both use the same concept of tag 
 - Search, autocomplete, tag browsing, and sidebar editing all depend on the same filename-based tag model
 - The filename is treated as the source of truth for tag persistence and tag semantics
 
+### Per-Request Library Context
+
+The system supports multiple independent libraries. To avoid conflicts when different clients access different libraries simultaneously, the library context is resolved **per-request** rather than stored in a global singleton.
+
+#### Flow
+
+```text
+Browser request with ?libraryId=eed3d01f
+  │
+  ▼
+LibraryContextMiddleware.InvokeAsync()
+  │  Reads libraryId from query string
+  │  Calls ILibraryService.GetPathByIdAsync(libraryId)
+  │    → Searches registry (LocalApplicationData/Collect/libraries.json)
+  │    → Supports both full ID and short prefix (first 8 chars)
+  │  Sets HttpContext.Items["LibraryPath"] = resolved path
+  │
+  ▼
+Subsequent code calls ILibraryService.GetLibraryPath()
+  │  Returns HttpContext.Items["LibraryPath"] as string
+  │  Returns null if middleware didn't set it (no ?libraryId=)
+  ▼
+All services (AssetService, etc.) use GetLibraryPath() to locate files
+```
+
+#### Key files
+
+| File | Role |
+|---|---|
+| `Middleware/LibraryContextMiddleware.cs` | Reads `libraryId` from query, resolves path via registry, stores in `HttpContext.Items` |
+| `Services/ILibraryService.cs` | `GetLibraryPath()` (reads from `HttpContext.Items`), `GetLibraryId()` (reads from `.collect/library.json`), `GetPathByIdAsync()` (registry lookup) |
+| `Services/LibraryService.cs` | Implementation — all path resolution is now stateless per-request |
+
+#### URL requirements
+
+Every frontend API call that needs library context must include `?libraryId=<id>` in the URL. This is handled by:
+
+- **`src/services/api.ts`** — all helper functions accept `libraryId` as the first parameter and append it to URLs
+- **Backend DTOs** — `AssetDto.ThumbnailUrl` and `AssetDetailDto.ThumbnailUrl`/`ImageUrl` automatically include `?libraryId=<currentId>`
+- **Frontend components** — `Sidebar.tsx` and `ImageViewerPage.tsx` construct image URLs manually with `&libraryId=` appended after the cache-busting `?t=` parameter
+
+#### Startup entries
+
+Both entry points must register the same middleware:
+
+| Entry Point | File | Registration |
+|---|---|---|
+| `dotnet run` (standalone) | `Program.cs` | `builder.Services.AddHttpContextAccessor()` + `app.UseMiddleware<LibraryContextMiddleware>()` |
+| WPF host | `CollectHost.cs` | Same registrations (added via `CollectHost.StartAsync`) |
+
 ### Key Architectural Rules
 
 - **No database** — asset state is inferred from the filesystem on each scan. Use `POST /api/assets/scan` after file changes.
 - **Tag changes rename files** — `UpdateTagsAsync` rebuilds the filename and calls `File.Move`.
 - **Scan-time normalization** — `NormalizeTagsAsync` auto-converts untyped tags when possible, records conflicts, and re-syncs filenames.
-- **Thumbnails are content-hash keyed** — MD5 of `filePath + fileSize + lastWriteTimeTicks`. Identical content reuses the thumbnail; orphan cleanup runs during scan.
+- **Thumbnails are asset-ID keyed** — stored as `{assetId}.webp` in `.collect/thumbnails/`. Generated lazily on first request via `GetOrCreateThumbnail`. Orphan cleanup runs during scan using the assets manifest.
 - **Upload supports filename preservation** — `POST /api/assets/upload` accepts `keepFilename=true` to preserve the original filename instead of using only the extension.
 - **Encrypted libraries** — unlock state is tracked via an `X-Unlock-Token` header, and files can be encrypted/decrypted in place.
 - **Library metadata is persisted** — recent libraries, category order, and registry entries are stored through `LibraryService`.
 - **Tag management is global** — category/tag rename/delete operations update all matching assets across the library.
+- **Per-request library context** — All API requests that need library context must include a `?libraryId=` query parameter. The `LibraryContextMiddleware` resolves it to the filesystem path via the registry and stores it in `HttpContext.Items["LibraryPath"]`. This replaces the old global singleton `_libraryPath` and enables safe concurrent access to different libraries.
+- **DTO URLs include libraryId** — `AssetDto.ThumbnailUrl` and `AssetDetailDto.ImageUrl`/`ThumbnailUrl` returned by the backend automatically include `?libraryId=<currentId>` so that image/thumbnail `<img>` requests from the browser carry the library context.
 
 ---
 
@@ -225,6 +277,7 @@ All types are defined in `src/types.ts` and mirror the backend DTOs closely.
 - **Tag filter** — uses `tags:keyword1+keyword2` query prefixes in `SearchInput`.
 - **Upload flow** — `AddAssetDialog` supports drag/drop, target-folder selection, and opt-in filename preservation.
 - **Library security** — unlock state is kept in `sessionStorage` via the `X-Unlock-Token` header.
+- **`libraryId` query parameter** — Every API call that needs library context passes `?libraryId=<id>` from the URL param. Backend DTOs (thumbnail/image URLs) also include it automatically. Components that construct image URLs inline (`Sidebar`, `ImageViewerPage`) must manually append `&libraryId=`. React hooks that capture `libraryId` in closures should include it in dependency arrays to avoid stale closures.
 
 ---
 

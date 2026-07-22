@@ -21,6 +21,7 @@ export interface TagSelectorProps {
     selectedTags: Set<string>
     /** Called when a tag is toggled */
     onToggleTag: (tagValue: string) => void
+    libraryId: string
 }
 
 export function TagSelector({
@@ -28,6 +29,7 @@ export function TagSelector({
     multiSelect = true,
     selectedTags,
     onToggleTag,
+    libraryId,
 }: TagSelectorProps) {
     const [tagData, setTagData] = useState<TagGroupsResponse | null>(null)
     const [searchTerm, setSearchTerm] = useState("")
@@ -41,7 +43,7 @@ export function TagSelector({
             ; (async () => {
                 try {
                     // Load a large batch to get all tags at once
-                    const result = await api.getTags(1, 200)
+                    const result = await api.getTags(libraryId, 1, 200)
                     if (cancelled) return
                     setTagData(result)
                     // Build tag type lookup

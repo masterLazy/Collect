@@ -32,6 +32,22 @@ public interface ILibraryService
     string? GetLibraryPath();
 
     /// <summary>
+    /// Get the current library's ID by reading .collect/library.json.
+    /// Returns null if no library path is set or the file doesn't exist.
+    /// </summary>
+    string? GetLibraryId();
+
+    /// <summary>
+    /// Resolve a library ID (full or short prefix) to its filesystem path.
+    /// </summary>
+    Task<string?> GetPathByIdAsync(string id);
+
+    /// <summary>
+    /// Resolve a library ID (full or short prefix) to its filesystem path (sync).
+    /// </summary>
+    string? GetPathById(string id);
+
+    /// <summary>
     /// Get the directory tree of the library.
     /// </summary>
     Task<DirectoryNode> GetDirectoryTreeAsync();

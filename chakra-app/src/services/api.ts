@@ -109,24 +109,24 @@ function normalizeDirectoryNode(node: DirectoryNode): DirectoryNode {
 export const api = {
     initLibrary: (path: string, name: string, password?: string) =>
         post<LibraryInfo>("/api/library/init", { path, name, ...(password ? { password } : {}) }),
-    getLibraryInfo: () => get<LibraryInfo>("/api/library/info"),
-    scanAssets: () => post<ScanResult>("/api/assets/scan"),
-    resolveTagConflicts: (resolutions: { tagValue: string; chosenType: string }[]) =>
-        post<{ success: boolean }>("/api/assets/resolve-tag-conflicts", { resolutions }),
-    getDirectoryTree: async () => {
-        const result = await get<DirectoryTreeResponse>("/api/library/tree");
+    getLibraryInfo: (libraryId: string) => get<LibraryInfo>(`/api/library/info?libraryId=${encodeURIComponent(libraryId)}`),
+    scanAssets: (libraryId: string) => post<ScanResult>(`/api/assets/scan?libraryId=${encodeURIComponent(libraryId)}`),
+    resolveTagConflicts: (libraryId: string, resolutions: { tagValue: string; chosenType: string }[]) =>
+        post<{ success: boolean }>(`/api/assets/resolve-tag-conflicts?libraryId=${encodeURIComponent(libraryId)}`, { resolutions }),
+    getDirectoryTree: async (libraryId: string) => {
+        const result = await get<DirectoryTreeResponse>(`/api/library/tree?libraryId=${encodeURIComponent(libraryId)}`);
         return {
             ...result,
             root: normalizeDirectoryNode(result.root),
         };
     },
-    createDirectory: (relativePath: string) =>
-        post<{ path: string }>("/api/library/create-directory", { relativePath }),
-    renameDirectory: (relativePath: string, newName: string) =>
-        post<{ path: string }>("/api/library/rename-directory", { relativePath, newName }),
-    deleteDirectory: (relativePath: string) =>
-        post<{ success: boolean }>("/api/library/delete-directory", { relativePath }),
-    uploadAssets: async (files: File[], targetDir: string, keepFilename?: boolean, tags?: AssetTag[]) => {
+    createDirectory: (libraryId: string, relativePath: string) =>
+        post<{ path: string }>(`/api/library/create-directory?libraryId=${encodeURIComponent(libraryId)}`, { relativePath }),
+    renameDirectory: (libraryId: string, relativePath: string, newName: string) =>
+        post<{ path: string }>(`/api/library/rename-directory?libraryId=${encodeURIComponent(libraryId)}`, { relativePath, newName }),
+    deleteDirectory: (libraryId: string, relativePath: string) =>
+        post<{ success: boolean }>(`/api/library/delete-directory?libraryId=${encodeURIComponent(libraryId)}`, { relativePath }),
+    uploadAssets: async (libraryId: string, files: File[], targetDir: string, keepFilename?: boolean, tags?: AssetTag[]) => {
         const formData = new FormData()
         files.forEach((f) => formData.append("files", f))
         formData.append("targetDir", targetDir)
@@ -138,7 +138,7 @@ export const api = {
             formData.append("tags", JSON.stringify(normalizedTags))
             formData.append("tagsJson", JSON.stringify(normalizedTags))
         }
-        const res = await fetch(API_BASE + "/api/assets/upload", {
+        const res = await fetch(API_BASE + `/api/assets/upload?libraryId=${encodeURIComponent(libraryId)}`, {
             method: "POST",
             headers: buildHeaders(),
             body: formData,
@@ -146,35 +146,36 @@ export const api = {
         if (!res.ok) throw new Error("Upload failed")
         return res.json() as Promise<UploadResult>
     },
-    getAssets: (page: number, size: number, folder?: string, subfolders?: boolean, sort?: string) => {
-        let url = `/api/assets?page=${page}&size=${size}`
+    getAssets: (libraryId: string, page: number, size: number, folder?: string, subfolders?: boolean, sort?: string) => {
+        let url = `/api/assets?libraryId=${encodeURIComponent(libraryId)}&page=${page}&size=${size}`
         if (folder) url += `&folder=${encodeURIComponent(folder)}`
         if (subfolders !== undefined) url += `&subfolders=${subfolders}`
         if (sort) url += `&sort=${sort}`
         return get<PaginatedResponse<AssetDto>>(url)
     },
-    getAsset: async (id: string) => {
-        const result = await get<AssetDetailDto>(`/api/assets/${id}`);
+    getAsset: async (id: string, libraryId: string) => {
+        const result = await get<AssetDetailDto>(`/api/assets/${id}?libraryId=${encodeURIComponent(libraryId)}`);
         return {
             ...result,
             relativePath: normalizePath(result.relativePath),
         };
     },
-    searchAssets: (query: string, page: number, size: number, folder?: string) =>
-        get<PaginatedResponse<AssetDto>>(`/api/assets/search?q=${encodeURIComponent(query)}&page=${page}&size=${size}${folder ? `&folder=${encodeURIComponent(folder)}` : ""}`),
-    updateTags: (id: string, tags: AssetTag[]) =>
-        put<AssetDetailDto>(`/api/assets/${id}/tags`, { tags }),
-    getTags: (page?: number, size?: number, search?: string) => {
+    searchAssets: (libraryId: string, query: string, page: number, size: number, folder?: string) =>
+        get<PaginatedResponse<AssetDto>>(`/api/assets/search?libraryId=${encodeURIComponent(libraryId)}&q=${encodeURIComponent(query)}&page=${page}&size=${size}${folder ? `&folder=${encodeURIComponent(folder)}` : ""}`),
+    updateTags: (id: string, tags: AssetTag[], libraryId: string) =>
+        put<AssetDetailDto>(`/api/assets/${id}/tags?libraryId=${encodeURIComponent(libraryId)}`, { tags }),
+    getTags: (libraryId: string, page?: number, size?: number, search?: string) => {
         const params = new URLSearchParams()
+        params.set("libraryId", libraryId)
         params.set("page", String(page ?? 1))
         params.set("size", String(size ?? 50))
         if (search) params.set("search", search)
         return get<TagGroupsResponse>(`/api/tags?${params.toString()}`)
     },
-    moveAsset: (id: string, targetFolder: string) =>
-        post<AssetDetailDto>(`/api/assets/${id}/move`, { targetFolder }),
-    deleteAsset: (id: string) =>
-        fetch(`${API_BASE}/api/assets/${id}`, { method: "DELETE", headers: buildHeaders() }).then((r) => {
+    moveAsset: (id: string, targetFolder: string, libraryId: string) =>
+        post<AssetDetailDto>(`/api/assets/${id}/move?libraryId=${encodeURIComponent(libraryId)}`, { targetFolder }),
+    deleteAsset: (id: string, libraryId: string) =>
+        fetch(`${API_BASE}/api/assets/${id}?libraryId=${encodeURIComponent(libraryId)}`, { method: "DELETE", headers: buildHeaders() }).then((r) => {
             if (!r.ok) throw new Error("Delete failed")
         }),
     checkLibraryPath: (path: string) =>
@@ -182,36 +183,36 @@ export const api = {
     healthCheck: () => get<LibraryInfo>("/api/library/info"),
     getLibraries: () => get<LibraryInfo[]>("/api/libraries"),
     loadLibrary: (id: string) => post<LibraryInfo>(`/api/library/load/${id}`),
-    getTagConflicts: () => get<TagConflict[]>("/api/assets/tag-conflicts"),
+    getTagConflicts: (libraryId: string) => get<TagConflict[]>(`/api/assets/tag-conflicts?libraryId=${encodeURIComponent(libraryId)}`),
     removeLibrary: (id: string) =>
         fetch(`${API_BASE}/api/libraries/${id}`, { method: "DELETE", headers: buildHeaders() }).then((r) => {
             if (!r.ok) throw new Error("Remove failed")
         }),
     getDrives: () => get<ServerDrive[]>("/api/fs/drives"),
     browsePath: (path: string) => get<ServerBrowseResponse>(`/api/fs/browse?path=${encodeURIComponent(path)}`),
-    categorizeTags: (changes: { tagValue: string; newType: string | null }[]) =>
-        post<{ affectedAssets: number }>("/api/assets/categorize", { changes }),
-    renameCategory: (oldType: string, newType: string) =>
-        post<{ success: boolean }>("/api/assets/rename-category", { oldType, newType }),
-    deleteCategory: (type: string) =>
-        post<{ success: boolean }>("/api/assets/delete-category", { type }),
-    renameTag: (oldValue: string, newValue: string) =>
-        post<{ success: boolean }>("/api/assets/rename-tag", { oldValue, newValue }),
-    deleteTag: (value: string) =>
-        post<{ success: boolean }>("/api/assets/delete-tag", { value }),
-    saveCategoryOrder: (order: string[]) =>
-        post<{ success: boolean }>("/api/library/category-order", { order }),
-    unlockLibrary: async (id: string, password: string) => {
-        const result = await post<{ library: LibraryInfo; token: string }>("/api/library/unlock", { password });
+    categorizeTags: (libraryId: string, changes: { tagValue: string; newType: string | null }[]) =>
+        post<{ affectedAssets: number }>(`/api/assets/categorize?libraryId=${encodeURIComponent(libraryId)}`, { changes }),
+    renameCategory: (libraryId: string, oldType: string, newType: string) =>
+        post<{ success: boolean }>(`/api/assets/rename-category?libraryId=${encodeURIComponent(libraryId)}`, { oldType, newType }),
+    deleteCategory: (libraryId: string, type: string) =>
+        post<{ success: boolean }>(`/api/assets/delete-category?libraryId=${encodeURIComponent(libraryId)}`, { type }),
+    renameTag: (libraryId: string, oldValue: string, newValue: string) =>
+        post<{ success: boolean }>(`/api/assets/rename-tag?libraryId=${encodeURIComponent(libraryId)}`, { oldValue, newValue }),
+    deleteTag: (libraryId: string, value: string) =>
+        post<{ success: boolean }>(`/api/assets/delete-tag?libraryId=${encodeURIComponent(libraryId)}`, { value }),
+    saveCategoryOrder: (libraryId: string, order: string[]) =>
+        post<{ success: boolean }>(`/api/library/category-order?libraryId=${encodeURIComponent(libraryId)}`, { order }),
+    unlockLibrary: async (libraryId: string, id: string, password: string) => {
+        const result = await post<{ library: LibraryInfo; token: string }>(`/api/library/unlock?libraryId=${encodeURIComponent(libraryId)}`, { password });
         setToken(result.token);
         return result.library;
     },
-    lockLibrary: () =>
-        post<{ message: string }>("/api/library/lock"),
-    getUnlockStatus: () =>
-        get<{ unlocked: boolean; remainingSeconds: number }>("/api/library/unlock-status"),
-    decryptLibrary: (password?: string) =>
-        post<{ message: string; decryptedCount: number }>("/api/library/decrypt", { password }),
-    encryptLibrary: (password: string) =>
-        post<{ message: string; encryptedCount: number }>("/api/library/encrypt", { password }),
+    lockLibrary: (libraryId: string) =>
+        post<{ message: string }>(`/api/library/lock?libraryId=${encodeURIComponent(libraryId)}`),
+    getUnlockStatus: (libraryId: string) =>
+        get<{ unlocked: boolean; remainingSeconds: number }>(`/api/library/unlock-status?libraryId=${encodeURIComponent(libraryId)}`),
+    decryptLibrary: (libraryId: string, password?: string) =>
+        post<{ message: string; decryptedCount: number }>(`/api/library/decrypt?libraryId=${encodeURIComponent(libraryId)}`, { password }),
+    encryptLibrary: (libraryId: string, password: string) =>
+        post<{ message: string; encryptedCount: number }>(`/api/library/encrypt?libraryId=${encodeURIComponent(libraryId)}`, { password }),
 };

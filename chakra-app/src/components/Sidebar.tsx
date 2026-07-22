@@ -118,6 +118,8 @@ function getClosestAspectRatio(w: number, h: number): { text: string; label?: st
 }
 
 export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, onTagsSaved, onRefreshRequested }: SidebarProps) {
+    const { libraryId } = useParams()
+    const navigate = useNavigate()
     const [asset, setAsset] = useState<AssetDetailDto | null>(null)
     const [loading, setLoading] = useState(false)
     const [imageLoaded, setImageLoaded] = useState(false)
@@ -143,14 +145,14 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         setCopiedPath(false)
         setImageExpanded(false)
         setImageOverflows(false)
-        api.getAsset(assetId)
+        api.getAsset(assetId, libraryId!)
             .then((data) => {
                 setAsset(data)
                 setTags(data.tags)
             })
             .catch(() => setError(true))
             .finally(() => setLoading(false))
-    }, [assetId])
+    }, [assetId, libraryId])
 
     const handleTagsChange = (newTags: AssetTag[]) => {
         setTags(newTags)
@@ -179,8 +181,6 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [copiedImage, setCopiedImage] = useState(false)
     const [imageHovered, setImageHovered] = useState(false)
     const imageBoxRef = useRef<HTMLDivElement>(null)
-    const { libraryId } = useParams()
-    const navigate = useNavigate()
 
     const handleOpenFullscreen = () => {
         if (!assetId || !libraryId) return
@@ -220,7 +220,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         setCopiedImage(true)
         setTimeout(() => setCopiedImage(false), 2000)
         try {
-            const response = await fetch(API_BASE + "/api/assets/" + assetId + "/clipboard-image")
+            const response = await fetch(API_BASE + "/api/assets/" + assetId + "/clipboard-image?libraryId=" + encodeURIComponent(libraryId!))
             const blob = await response.blob()
             await navigator.clipboard.write([
                 new ClipboardItem({ "image/png": blob }),
@@ -235,7 +235,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const handleDelete = async () => {
         if (!asset) return
         try {
-            await api.deleteAsset(asset.id)
+            await api.deleteAsset(asset.id, libraryId!)
             toaster.create({ title: "Asset deleted", type: "success" })
             setDeleted(true)
             setAsset(null)
@@ -257,7 +257,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         setMoving(true)
         try {
             const target = selectedMoveTarget // "" = root in backend
-            const updated = await api.moveAsset(asset.id, target)
+            const updated = await api.moveAsset(asset.id, target, libraryId!)
             setAsset(updated)
             setTags(updated.tags)
             toaster.create({ title: "Moved to " + (target || "root"), type: "success" })
@@ -300,7 +300,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                         </Box>
                     ) : (
                         <Image
-                            src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset?.lastModified ?? "")}
+                            src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset?.lastModified ?? "") + "&libraryId=" + encodeURIComponent(libraryId!)}
                             alt=""
                             width="full"
                             height="full"
@@ -437,6 +437,8 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                             onTagClick={onTagClick}
                             selectedTags={selectedTags}
                             onTagsSaved={handleTagsSaved}
+                            libraryId={libraryId!}
+                            toaster={toaster}
                         />
                     </Box>
 
@@ -546,6 +548,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                                         <DirectoryTreePicker
                                             selectedPath={selectedMoveTarget}
                                             onSelect={(path) => { setSelectedMoveTarget(path); setMoveTargetSelected(true) }}
+                                            libraryId={libraryId!}
                                         />
                                         {!selectedMoveTarget && (
                                             <Text fontSize="xs" color="fg.subtle" mt="2">Select a folder to move the asset into</Text>

@@ -131,7 +131,7 @@ export function LibraryPage() {
                         setLibraryEncrypted(true)
                         // Check if already unlocked (10-min persistence)
                         try {
-                            const status = await api.getUnlockStatus()
+                            const status = await api.getUnlockStatus(libraryId!)
                             if (!status.unlocked) {
                                 setShowUnlockDialog(true)
                             }
@@ -178,7 +178,7 @@ export function LibraryPage() {
             loadAssets(1, searchFromUrl, false, toApiFolder(folderFromUrl), getSubfolders(folderFromUrl))
                 .then(() => {
                     // Check for tag conflicts after initial load
-                    api.getTagConflicts().then((conflicts) => {
+                    api.getTagConflicts(libraryId!).then((conflicts) => {
                         if (conflicts && conflicts.length > 0) {
                             setTagConflicts(conflicts)
                             setConflictDialogOpen(true)
@@ -224,9 +224,9 @@ export function LibraryPage() {
             const resolvedSort = sort ?? sortMode
             let result: Awaited<ReturnType<typeof api.getAssets>>
             if (query) {
-                result = await api.searchAssets(query, pageNum, PAGE_SIZE, folder || undefined)
+                result = await api.searchAssets(libraryId!, query, pageNum, PAGE_SIZE, folder || undefined)
             } else {
-                result = await api.getAssets(pageNum, PAGE_SIZE, folder || undefined, subfolders, resolvedSort === "newest" ? undefined : resolvedSort)
+                result = await api.getAssets(libraryId!, pageNum, PAGE_SIZE, folder || undefined, subfolders, resolvedSort === "newest" ? undefined : resolvedSort)
             }
             setAssets((prev) => (append ? [...prev, ...result.items] : result.items))
             setTotal(result.total)
@@ -309,7 +309,7 @@ export function LibraryPage() {
         // Show blur overlay immediately
         setRemovedAssetMap((prev) => new Map(prev).set(assetId, 'moved'))
         try {
-            await api.moveAsset(assetId, targetFolder)
+            await api.moveAsset(assetId, targetFolder, libraryId!)
             toaster.create({
                 title: "Asset moved",
                 description: `Moved to ${targetFolder || "root"}`,
@@ -341,7 +341,7 @@ export function LibraryPage() {
     const handleRescan = useCallback(async () => {
         setScanning(true)
         try {
-            const result = await api.scanAssets()
+            const result = await api.scanAssets(libraryId!)
             setPage(1)
             setAssets([])
             setTreeRefreshKey((k) => k + 1)
@@ -368,7 +368,7 @@ export function LibraryPage() {
     const handleResolveConflicts = useCallback(async (resolutions: { tagValue: string; chosenType: string }[]) => {
         setResolvingConflicts(true)
         try {
-            await api.resolveTagConflicts(resolutions)
+            await api.resolveTagConflicts(libraryId!, resolutions)
             setConflictDialogOpen(false)
             setTagConflicts([])
             // Reload assets to reflect changes
@@ -392,7 +392,7 @@ export function LibraryPage() {
         setDecrypting(true)
         setDecryptError("")
         try {
-            const result = await api.decryptLibrary(password)
+            const result = await api.decryptLibrary(libraryId!, password)
             setLibraryEncrypted(false)
             setShowDecryptDialog(false)
             toaster.create({
@@ -423,7 +423,7 @@ export function LibraryPage() {
         setEncrypting(true)
         setEncryptError("")
         try {
-            const result = await api.encryptLibrary(encryptPassword)
+            const result = await api.encryptLibrary(libraryId!, encryptPassword)
             setLibraryEncrypted(true)
             setShowEncryptDialog(false)
             setEncryptPassword("")
@@ -533,7 +533,7 @@ export function LibraryPage() {
                 toaster={toaster}
                 onLock={async () => {
                     try {
-                        await api.lockLibrary();
+                        await api.lockLibrary(libraryId!);
                         sessionStorage.removeItem("collect-unlock-token");
                         toaster.create({
                             title: "Library locked",
@@ -569,7 +569,7 @@ export function LibraryPage() {
                     display={{ base: "none", md: "block" }}
                     py="2"
                 >
-                    <DirectoryTree currentFolder={currentFolder} onFolderChange={handleFolderChange} onMoveAsset={handleMoveAsset} refreshKey={treeRefreshKey} />
+                    <DirectoryTree currentFolder={currentFolder} onFolderChange={handleFolderChange} onMoveAsset={handleMoveAsset} refreshKey={treeRefreshKey} libraryId={libraryId!} />
                 </Box>
 
                 {/* Center: Masonry */}
@@ -597,6 +597,7 @@ export function LibraryPage() {
                 isMobile={isMobile}
                 onAssetsAdded={() => { setPage(1); setAssets([]); setTreeRefreshKey((k) => k + 1); loadAssets(1, searchQuery, false, currentFolder || undefined, getSubfolders(currentFolder)) }}
                 currentFolder={currentFolder}
+                libraryId={libraryId}
             />
 
             {/* Mobile directory drawer (bottom) */}
@@ -626,6 +627,7 @@ export function LibraryPage() {
                                     }}
                                     onMoveAsset={handleMoveAsset}
                                     refreshKey={treeRefreshKey}
+                                    libraryId={libraryId!}
                                 />
                             </Drawer.Body>
                         </Drawer.Content>
@@ -717,10 +719,10 @@ export function LibraryPage() {
                                         setUnlocking(true)
                                         setUnlockError("")
                                         try {
-                                            await api.unlockLibrary(libraryId!, unlockPassword)
+                                            await api.unlockLibrary(libraryId!, libraryId!, unlockPassword)
                                             setShowUnlockDialog(false)
                                             // Reload assets after unlock
-                                            const info = await api.getLibraryInfo()
+                                            const info = await api.getLibraryInfo(libraryId!)
                                             setLibraryName(info.name)
                                             setLibraryFullId(info.id)
                                             setLibraryPath(info.path)

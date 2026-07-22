@@ -8,6 +8,7 @@ interface DirectoryTreeProps {
     onFolderChange: (folder: string) => void
     onMoveAsset?: (assetId: string, targetFolder: string) => void
     refreshKey?: number
+    libraryId: string
 }
 
 function FolderIcon() {
@@ -74,6 +75,7 @@ function FolderNode({
     onFolderChange,
     loadTree,
     onMoveAsset,
+    libraryId,
 }: {
     node: DirectoryNodeType
     depth: number
@@ -81,6 +83,7 @@ function FolderNode({
     onFolderChange: (folder: string) => void
     loadTree: () => void
     onMoveAsset?: (assetId: string, targetFolder: string) => void
+    libraryId: string
 }) {
     // Top-level folders expanded by default, deeper ones collapsed
     const [expanded, setExpanded] = useState(depth === 0)
@@ -142,7 +145,7 @@ function FolderNode({
             const parentPath = getParentPath(node.path)
             // If renamed folder is at root (no parent), just use newName
             const newPath = parentPath ? `${parentPath}/${renameName.trim()}` : renameName.trim()
-            await api.renameDirectory(node.path, renameName.trim())
+            await api.renameDirectory(libraryId, node.path, renameName.trim())
             if (currentFolder === node.path) {
                 onFolderChange(newPath)
             }
@@ -158,7 +161,7 @@ function FolderNode({
     const handleDelete = async () => {
         setDeleting(true)
         try {
-            await api.deleteDirectory(node.path)
+            await api.deleteDirectory(libraryId, node.path)
             if (currentFolder === node.path) {
                 onFolderChange("")
             }
@@ -176,7 +179,7 @@ function FolderNode({
         setCreatingSubdir(true)
         try {
             const subdirPath = node.path ? `${node.path}/${subdirName.trim()}` : subdirName.trim()
-            await api.createDirectory(subdirPath)
+            await api.createDirectory(libraryId, subdirPath)
             setSubdirDialogOpen(false)
             setSubdirName("")
             setExpanded(true) // auto-expand parent so user sees the new folder
@@ -449,6 +452,7 @@ function FolderNode({
                             onFolderChange={onFolderChange}
                             loadTree={loadTree}
                             onMoveAsset={onMoveAsset}
+                            libraryId={libraryId}
                         />
                     ))}
                 </Box>
@@ -457,7 +461,7 @@ function FolderNode({
     )
 }
 
-export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refreshKey }: DirectoryTreeProps) {
+export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refreshKey, libraryId }: DirectoryTreeProps) {
     const [tree, setTree] = useState<DirectoryNodeType | null>(null)
     const [loading, setLoading] = useState(true)
     const [totalAssetCount, setTotalAssetCount] = useState(0)
@@ -470,7 +474,7 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
     const loadTree = useCallback(() => {
         const ver = ++treeVersionRef.current
         setLoading(true)
-        api.getDirectoryTree()
+        api.getDirectoryTree(libraryId)
             .then((data) => {
                 if (ver === treeVersionRef.current) setTree(data.root)
             })
@@ -479,10 +483,10 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
                 if (ver === treeVersionRef.current) setLoading(false)
             })
         // Also fetch library info for total count
-        api.getLibraryInfo().then((info) => {
+        api.getLibraryInfo(libraryId).then((info) => {
             setTotalAssetCount(info.assetCount)
         }).catch(() => { })
-    }, [])
+    }, [libraryId])
 
     useEffect(() => {
         loadTree()
@@ -498,7 +502,7 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
             const relativePath = parentFolder
                 ? `${parentFolder}/${newDirName.trim()}`
                 : newDirName.trim()
-            await api.createDirectory(relativePath)
+            await api.createDirectory(libraryId, relativePath)
             setCreateDirOpen(false)
             setNewDirName("")
             loadTree()
@@ -568,6 +572,7 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
                             onFolderChange={onFolderChange}
                             loadTree={loadTree}
                             onMoveAsset={onMoveAsset}
+                            libraryId={libraryId}
                         />
                     ))}
 
@@ -608,6 +613,7 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
                             onFolderChange={onFolderChange}
                             loadTree={loadTree}
                             onMoveAsset={onMoveAsset}
+                            libraryId={libraryId}
                         />
                     ))}
                 </>

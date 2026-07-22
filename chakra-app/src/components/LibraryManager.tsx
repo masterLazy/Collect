@@ -116,7 +116,7 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
         setScanning(true)
         try {
             const info = await api.initLibrary(path, name, encryptLibrary ? password : undefined)
-            await api.scanAssets()
+            await api.scanAssets(info.id)
             fetchLibraries()
             toaster.create({
                 title: "Library created",

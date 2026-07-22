@@ -396,7 +396,7 @@ export function TopBar({
 
                 {/* Desktop: SearchInput stays in first row */}
                 <Box flex="1" display={{ base: "none", md: "block" }}>
-                    <SearchInput value={searchQuery} onChange={onSearchChange} />
+                    <SearchInput value={searchQuery} onChange={onSearchChange} libraryId={libraryId} />
                 </Box>
 
                 {/* Action buttons */}
@@ -470,6 +470,7 @@ export function TopBar({
                         onCategorizeSave={onCategorizeSave}
                         isMobile={isMobile}
                         toaster={toaster}
+                        libraryId={libraryId}
                     />
 
                     {/* More menu (desktop & mobile) */}
@@ -606,7 +607,7 @@ export function TopBar({
                 css={{ transition: "opacity 0.2s ease" }}
                 shadow={searchVisible ? "md" : "none"}
             >
-                <SearchInput value={searchQuery} onChange={onSearchChange} />
+                <SearchInput value={searchQuery} onChange={onSearchChange} libraryId={libraryId} />
             </Box>
         </Box>
     )

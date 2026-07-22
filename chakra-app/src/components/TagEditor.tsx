@@ -3,6 +3,7 @@ import { Box, Button, Field, HStack, Input, Stack, Text } from "@chakra-ui/react
 import { TagBadge } from "./TagBadge"
 import { api } from "../services/api"
 import type { AssetDetailDto, AssetTag } from "../types"
+import type { CustomToaster } from "./CustomToast"
 
 interface TagEditorProps {
     tags: AssetTag[]
@@ -11,6 +12,8 @@ interface TagEditorProps {
     onTagClick?: (value: string) => void
     selectedTags?: string[]
     onTagsSaved?: (updatedAsset: AssetDetailDto) => void
+    libraryId: string
+    toaster?: CustomToaster
 }
 
 function CheckIcon() {
@@ -55,7 +58,16 @@ function EditIcon() {
     )
 }
 
-export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTags = [], onTagsSaved }: TagEditorProps) {
+function CopyIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+    )
+}
+
+export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTags = [], onTagsSaved, libraryId, toaster }: TagEditorProps) {
     const [initialTags, setInitialTags] = useState<AssetTag[]>([])
     const [inputValue, setInputValue] = useState("")
     const [suggestions, setSuggestions] = useState<string[]>([])
@@ -91,7 +103,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                 if (partialCategory) {
                     // Case 1: Typing inside brackets [partial → show category suggestions
                     // Load without search param so we can filter group names client-side
-                    const result = await api.getTags(1, 50)
+                    const result = await api.getTags(libraryId, 1, 50)
                     if (cancelled) return
                     // Build type map from response
                     const typeMap = new Map<string, string | null>()
@@ -108,7 +120,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                 } else if (completeCategory) {
                     // Case 2: Complete category bracket [Type]partial → show value suggestions for that category
                     // Load without search param, filter client-side by group type
-                    const result = await api.getTags(1, 50)
+                    const result = await api.getTags(libraryId, 1, 50)
                     if (cancelled) return
                     // Build type map from response
                     const typeMap = new Map<string, string | null>()
@@ -130,7 +142,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                 } else {
                     // Normal search or empty input — pass search term to API for server-side filtering
                     const searchTerm = inputValue || undefined
-                    const result = await api.getTags(1, 50, searchTerm)
+                    const result = await api.getTags(libraryId, 1, 50, searchTerm)
                     if (cancelled) return
                     // Build type map from response
                     const typeMap = new Map<string, string | null>()
@@ -223,6 +235,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
 
         if (currentTags.length !== tags.length || JSON.stringify(currentTags) !== JSON.stringify(tags)) {
             onTagsChange(currentTags)
+            setDeleteMode(true)
         }
 
         setInputValue("")
@@ -235,9 +248,14 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
     }
 
     const handleSave = async () => {
+        if (!hasChanges) {
+            // No actual changes — just exit edit mode
+            setDeleteMode(false)
+            return
+        }
         setSaving(true)
         try {
-            const updated = await api.updateTags(assetId, tags)
+            const updated = await api.updateTags(assetId, tags, libraryId)
             setInitialTags(updated.tags)
             setDeleteMode(false)
             onTagsSaved?.(updated)
@@ -251,6 +269,18 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
     const handleUndo = () => {
         onTagsChange([...initialTags])
         setDeleteMode(false)
+    }
+
+    const handleCopyTags = async () => {
+        const tagString = tags
+            .map(t => t.type ? `[${t.type}]${t.value}` : t.value)
+            .join("-")
+        try {
+            await navigator.clipboard.writeText(tagString)
+            toaster?.create({ title: "Tags copied", type: "success" })
+        } catch {
+            toaster?.create({ title: "Failed to copy tags", type: "error" })
+        }
     }
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -293,50 +323,100 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
     // Load category order for sorting
     const [categoryOrder, setCategoryOrder] = useState<string[]>([])
     useEffect(() => {
-        api.getLibraryInfo().then((info) => {
+        api.getLibraryInfo(libraryId).then((info) => {
             if (info.categoryOrder) {
                 setCategoryOrder(info.categoryOrder)
             }
         }).catch(() => { })
-    }, [])
+    }, [libraryId])
 
     return (
         <Stack gap="3" position="relative">
             <HStack gap="1" justify="space-between">
                 <HStack gap="1">
                     <Text fontWeight="semibold" fontSize="sm" color="fg">Tags</Text>
-                    {hasChanges && (
-                        <Text color="red.400" fontWeight="bold" fontSize="sm" lineHeight="1">*</Text>
+                    <Text
+                        color="red.400"
+                        fontWeight="bold"
+                        fontSize="sm"
+                        lineHeight="1"
+                        visibility={hasChanges ? "visible" : "hidden"}
+                    >*</Text>
+                    {/* Copy — always visible when there are tags */}
+                    {tags.length > 0 && (
+                        <Box
+                            as="button"
+                            onClick={handleCopyTags}
+                            display="inline-flex"
+                            alignItems="center"
+                            justifyContent="center"
+                            width="6"
+                            height="6"
+                            borderRadius="md"
+                            color="fg.subtle"
+                            opacity={0.5}
+                            _hover={{ opacity: 1, bg: "bg.subtle", cursor: "pointer" }}
+                            transition="opacity 0.1s ease"
+                            aria-label="Copy tags"
+                        >
+                            <CopyIcon />
+                        </Box>
+                    )}
+                    {/* Pen — shown when not in edit mode */}
+                    {!deleteMode && !hasChanges && tags.length > 0 && (
+                        <Box
+                            as="button"
+                            onClick={() => setDeleteMode(true)}
+                            display="inline-flex"
+                            alignItems="center"
+                            justifyContent="center"
+                            width="6"
+                            height="6"
+                            borderRadius="md"
+                            color="fg.subtle"
+                            opacity={0.5}
+                            _hover={{ opacity: 1, bg: "bg.subtle", cursor: "pointer" }}
+                            transition="opacity 0.1s ease"
+                            aria-label="Edit tags"
+                        >
+                            <EditIcon />
+                        </Box>
                     )}
                 </HStack>
                 {onTagsSaved && (
-                    <HStack
-                        gap="1"
-                        opacity={hasChanges ? 1 : 0}
-                        transition="opacity 0.15s"
-                        flexShrink="0"
-                    >
-                        <Button
-                            size="xs"
-                            variant="ghost"
-                            colorPalette="accent"
-                            loading={saving}
-                            onClick={handleSave}
-                            disabled={!hasChanges}
-                            px="1.5"
+                    <HStack gap="1" flexShrink="0">
+                        {/* Reset — always rendered, visible only when there are pending changes */}
+                        <Box
+                            visibility={hasChanges ? "visible" : "hidden"}
+                            display="inline-flex"
                         >
-                            <CheckIcon />
-                        </Button>
-                        <Button
-                            size="xs"
-                            variant="ghost"
-                            colorPalette="red"
-                            onClick={handleUndo}
-                            disabled={!hasChanges}
-                            px="1.5"
+                            <Button
+                                size="xs"
+                                variant="ghost"
+                                colorPalette="red"
+                                onClick={handleUndo}
+                                px="1.5"
+                            >
+                                <UndoIcon />
+                            </Button>
+                        </Box>
+                        {/* Check — always rendered, visible when in edit mode or there are pending changes */}
+                        <Box
+                            visibility={(deleteMode || hasChanges) ? "visible" : "hidden"}
+                            display="inline-flex"
                         >
-                            <UndoIcon />
-                        </Button>
+                            <Button
+                                size="xs"
+                                variant="ghost"
+                                colorPalette="accent"
+                                loading={saving}
+                                onClick={handleSave}
+                                px="1.5"
+                            >
+                                <CheckIcon />
+                            </Button>
+                        </Box>
+
                     </HStack>
                 )}
             </HStack>
@@ -397,32 +477,14 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                         </Box>
                     )
                 })}
-                {/* Edit icon to enter delete mode — hidden while in edit mode */}
-                {tags.length > 0 && !deleteMode && (
-                    <Box
-                        as="button"
-                        onClick={() => setDeleteMode(true)}
-                        display="inline-flex"
-                        alignItems="center"
-                        justifyContent="center"
-                        width="6"
-                        height="6"
-                        borderRadius="md"
-                        color="fg.subtle"
-                        opacity={0.5}
-                        _hover={{ opacity: 1, bg: "bg.subtle", cursor: "pointer" }}
-                        aria-label="Edit tags"
-                    >
-                        <EditIcon />
-                    </Box>
-                )}
+
             </HStack>
 
             <Field.Root>
                 <HStack gap="2" width="full">
                     <Input
                         ref={inputRef}
-                        placeholder="Add tag..."
+                        placeholder="Add tags..."
                         value={inputValue}
                         onChange={(e) => setInputValue(e.target.value)}
                         onFocus={handleFocus}
