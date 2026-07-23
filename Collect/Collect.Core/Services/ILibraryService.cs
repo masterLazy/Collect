@@ -32,6 +32,22 @@ public interface ILibraryService
     string? GetLibraryPath();
 
     /// <summary>
+    /// Get the current library's ID by reading .collect/library.json.
+    /// Returns null if no library path is set or the file doesn't exist.
+    /// </summary>
+    string? GetLibraryId();
+
+    /// <summary>
+    /// Resolve a library ID (full or short prefix) to its filesystem path.
+    /// </summary>
+    Task<string?> GetPathByIdAsync(string id);
+
+    /// <summary>
+    /// Resolve a library ID (full or short prefix) to its filesystem path (sync).
+    /// </summary>
+    string? GetPathById(string id);
+
+    /// <summary>
     /// Get the directory tree of the library.
     /// </summary>
     Task<DirectoryNode> GetDirectoryTreeAsync();
@@ -66,6 +82,13 @@ public interface ILibraryService
     /// Update the AssetCount in the library's library.json and the registry.
     /// </summary>
     Task UpdateAssetCountAsync(int count);
+
+    /// <summary>
+    /// Apply a mutation to library.json under a file lock.
+    /// The action receives the current LibraryInfo and should mutate it in place.
+    /// The updated info is then written back to disk.
+    /// </summary>
+    Task UpdateLibraryInfoAsync(Action<LibraryInfo> updateAction);
 
     /// <summary>
     /// Get the custom display order for tag categories, or null if not set.

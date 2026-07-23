@@ -22,6 +22,7 @@ interface MasonryGridProps {
     onSelectAsset: (id: string) => void
     currentFolder: string
     searchQuery: string
+    removedAssetIds?: Map<string, 'deleted' | 'moved'>
 }
 
 function getResponsiveParams(containerWidth: number): { columnWidth: number; gap: number } {
@@ -54,7 +55,7 @@ function distributeToColumns(items: AssetDto[], columnCount: number, columnWidth
     return columns
 }
 
-export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsset, currentFolder, searchQuery }: MasonryGridProps) {
+export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsset, currentFolder, searchQuery, removedAssetIds }: MasonryGridProps) {
     const sentinelRef = useRef<HTMLDivElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
     const loadingRef = useRef(loading)
@@ -175,6 +176,7 @@ export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsse
                                         apiBase={API_BASE}
                                         onClick={() => onSelectAsset(asset.id)}
                                         onDragStart={handleCardDragStart(asset.id)}
+                                        removed={removedAssetIds?.has(asset.id) ? { reason: removedAssetIds.get(asset.id)! as 'deleted' | 'moved' } : undefined}
                                     />
                                 ))}
                             </Box>

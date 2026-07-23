@@ -16,6 +16,8 @@ import {
     Text,
 } from "@chakra-ui/react"
 import { api, API_BASE } from "../services/api"
+import { copyToClipboard } from "../services/clipboard"
+import { PaletteBar } from "./PaletteBar"
 import { TagEditor } from "./TagEditor"
 import { DirectoryTreePicker } from "./DirectoryPicker"
 import type { AssetDetailDto, AssetTag } from "../types"
@@ -27,7 +29,7 @@ interface SidebarProps {
     onTagClick?: (value: string) => void
     selectedTags?: string[]
     onTagsSaved?: (updated: AssetDetailDto) => void
-    onRefreshRequested?: () => void
+    onRefreshRequested?: (assetId?: string, reason?: 'deleted' | 'moved') => void
 }
 
 function XIcon() {
@@ -118,6 +120,8 @@ function getClosestAspectRatio(w: number, h: number): { text: string; label?: st
 }
 
 export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, onTagsSaved, onRefreshRequested }: SidebarProps) {
+    const { libraryId } = useParams()
+    const navigate = useNavigate()
     const [asset, setAsset] = useState<AssetDetailDto | null>(null)
     const [loading, setLoading] = useState(false)
     const [imageLoaded, setImageLoaded] = useState(false)
@@ -128,26 +132,29 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [selectedMoveTarget, setSelectedMoveTarget] = useState<string>("")
     const [moveTargetSelected, setMoveTargetSelected] = useState(false)
     const [moving, setMoving] = useState(false)
+    const [deleted, setDeleted] = useState(false)
 
     useEffect(() => {
         if (!assetId) {
             setAsset(null)
+            setDeleted(false)
             return
         }
+        setDeleted(false)
         setLoading(true)
         setError(false)
         setImageLoaded(false)
         setCopiedPath(false)
         setImageExpanded(false)
         setImageOverflows(false)
-        api.getAsset(assetId)
+        api.getAsset(assetId, libraryId!)
             .then((data) => {
                 setAsset(data)
                 setTags(data.tags)
             })
             .catch(() => setError(true))
             .finally(() => setLoading(false))
-    }, [assetId])
+    }, [assetId, libraryId])
 
     const handleTagsChange = (newTags: AssetTag[]) => {
         setTags(newTags)
@@ -160,13 +167,10 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
 
     const handleCopyPath = async () => {
         if (!asset) return
-        try {
-            await navigator.clipboard.writeText(asset.relativePath)
+        const ok = await copyToClipboard(asset.relativePath, toaster)
+        if (ok) {
             setCopiedPath(true)
-            toaster.create({ title: "Path copied", type: "success" })
             setTimeout(() => setCopiedPath(false), 2000)
-        } catch {
-            toaster.create({ title: "Failed to copy", type: "error" })
         }
     }
 
@@ -176,8 +180,6 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [copiedImage, setCopiedImage] = useState(false)
     const [imageHovered, setImageHovered] = useState(false)
     const imageBoxRef = useRef<HTMLDivElement>(null)
-    const { libraryId } = useParams()
-    const navigate = useNavigate()
 
     const handleOpenFullscreen = () => {
         if (!assetId || !libraryId) return
@@ -217,7 +219,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         setCopiedImage(true)
         setTimeout(() => setCopiedImage(false), 2000)
         try {
-            const response = await fetch(API_BASE + "/api/assets/" + assetId + "/clipboard-image")
+            const response = await fetch(API_BASE + "/api/assets/" + assetId + "/clipboard-image?libraryId=" + encodeURIComponent(libraryId!))
             const blob = await response.blob()
             await navigator.clipboard.write([
                 new ClipboardItem({ "image/png": blob }),
@@ -232,10 +234,12 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const handleDelete = async () => {
         if (!asset) return
         try {
-            await api.deleteAsset(asset.id)
+            await api.deleteAsset(asset.id, libraryId!)
             toaster.create({ title: "Asset deleted", type: "success" })
-            onRefreshRequested?.()
-            onClose()
+            setDeleted(true)
+            setAsset(null)
+            setDeleteConfirmOpen(false)
+            onRefreshRequested?.(asset.id, 'deleted')
         } catch {
             toaster.create({ title: "Delete failed", type: "error" })
         }
@@ -252,12 +256,12 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         setMoving(true)
         try {
             const target = selectedMoveTarget // "" = root in backend
-            const updated = await api.moveAsset(asset.id, target)
+            const updated = await api.moveAsset(asset.id, target, libraryId!)
             setAsset(updated)
             setTags(updated.tags)
             toaster.create({ title: "Moved to " + (target || "root"), type: "success" })
             setMoveDialogOpen(false)
-            onRefreshRequested?.()
+            onRefreshRequested?.(asset.id, 'moved')
         } catch {
             toaster.create({ title: "Move failed", type: "error" })
         } finally {
@@ -295,7 +299,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                         </Box>
                     ) : (
                         <Image
-                            src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset?.lastModified ?? "")}
+                            src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset?.lastModified ?? "") + "&libraryId=" + encodeURIComponent(libraryId!)}
                             alt=""
                             width="full"
                             height="full"
@@ -394,8 +398,34 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                 </Stack>
             )}
 
+            {/* Asset deleted state */}
+            {deleted && (
+                <Stack gap="4">
+                    <Box
+                        borderRadius="md"
+                        bg="bg.subtle"
+                        border="1px solid"
+                        borderColor="border"
+                        p="6"
+                        textAlign="center"
+                    >
+                        <Stack gap="2">
+                            <Text color="fg.muted" fontSize="lg">Asset deleted</Text>
+                            <Text color="fg.subtle" fontSize="sm">This asset has been removed from the library.</Text>
+                        </Stack>
+                    </Box>
+                    <Button size="xs" variant="outline" width="full" disabled>
+                        Move to...
+                    </Button>
+                    <Button size="xs" variant="outline" colorPalette="red" disabled>
+                        <TrashIcon />
+                        <Box as="span" ml="1">Delete</Box>
+                    </Button>
+                </Stack>
+            )}
+
             {/* Asset details */}
-            {asset && !loading && (
+            {asset && !loading && !deleted && (
                 <>
                     {/* Tags first — right after preview image */}
                     <Box pt="1">
@@ -406,10 +436,20 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                             onTagClick={onTagClick}
                             selectedTags={selectedTags}
                             onTagsSaved={handleTagsSaved}
+                            libraryId={libraryId!}
+                            toaster={toaster}
                         />
                     </Box>
 
                     <Separator />
+
+                    {/* Palette bar - full width row above metadata */}
+                    {asset.palette && (
+                        <Box>
+                            <Text color="fg.muted" fontSize="sm" mb="1.5">Colors</Text>
+                            <PaletteBar palette={asset.palette} />
+                        </Box>
+                    )}
 
                     {/* Metadata grid */}
                     <Box
@@ -515,6 +555,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                                         <DirectoryTreePicker
                                             selectedPath={selectedMoveTarget}
                                             onSelect={(path) => { setSelectedMoveTarget(path); setMoveTargetSelected(true) }}
+                                            libraryId={libraryId!}
                                         />
                                         {!selectedMoveTarget && (
                                             <Text fontSize="xs" color="fg.subtle" mt="2">Select a folder to move the asset into</Text>

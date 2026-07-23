@@ -38,16 +38,10 @@ function HomePage() {
 
     let cancelled = false
 
-    api.healthCheck()
+    api.getLibraries()
       .then(() => {
         if (cancelled) return
-        return api.getLibraryInfo()
-      })
-      .then((info) => {
-        if (!cancelled) {
-          // Always show library manager — let the user pick a library
-          setLibraryReady(false)
-        }
+        setLibraryReady(false)
       })
       .catch((err) => {
         if (!cancelled) {
@@ -89,7 +83,7 @@ function HomePage() {
             onClick={() => {
               setInitError(false)
               setInitializing(true)
-              api.getLibraryInfo()
+              api.getLibraries()
                 .then(() => setLibraryReady(true))
                 .catch(() => setInitError(true))
                 .finally(() => setInitializing(false))

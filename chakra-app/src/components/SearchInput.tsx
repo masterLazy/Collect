@@ -5,6 +5,7 @@ import { api } from "../services/api"
 interface SearchInputProps {
     value: string
     onChange: (value: string) => void
+    libraryId?: string
 }
 
 function SearchIcon() {
@@ -53,7 +54,7 @@ function getSelectedTagValues(suffix: string): string[] {
     return suffix.split("+").filter(Boolean)
 }
 
-export function SearchInput({ value, onChange }: SearchInputProps) {
+export function SearchInput({ value, onChange, libraryId }: SearchInputProps) {
     const [localValue, setLocalValue] = useState(value)
     const [suggestions, setSuggestions] = useState<{ value: string; type: string | null }[]>([])
     const [showSuggestions, setShowSuggestions] = useState(false)
@@ -110,7 +111,7 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
                     const bracketComplete = bracketText.match(/^\[([^\]]+)\](.*)$/)
 
                     if (bracketPartial) {
-                        const res = await api.getTags(1, 50)
+                        const res = await api.getTags(libraryId ?? "", 1, 50)
                         if (cancelled) return
                         const partial = bracketPartial![1].toLowerCase()
                         const cats = res.groups
@@ -120,7 +121,7 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
                         setShowSuggestions(inputFocused && cats.length > 0)
                         setHighlightedIndex(-1)
                     } else if (bracketComplete) {
-                        const res = await api.getTags(1, 50)
+                        const res = await api.getTags(libraryId ?? "", 1, 50)
                         if (cancelled) return
                         const categoryType = bracketComplete![1]
                         const valuePartial = bracketComplete![2].toLowerCase()
@@ -148,7 +149,7 @@ export function SearchInput({ value, onChange }: SearchInputProps) {
 
                 const query = currentSegment.toLowerCase()
                 const searchTerm = query || undefined
-                const res = await api.getTags(1, 50, searchTerm)
+                const res = await api.getTags(libraryId ?? "", 1, 50, searchTerm)
                 if (cancelled) return
 
                 const usedSet = new Set(selectedValues.map(v => v.toLowerCase()))

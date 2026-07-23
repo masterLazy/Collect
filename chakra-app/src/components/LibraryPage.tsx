@@ -96,7 +96,8 @@ export function LibraryPage() {
     const [encryptConfirm, setEncryptConfirm] = useState("")
     const [encryptError, setEncryptError] = useState("")
     const [encrypting, setEncrypting] = useState(false)
-
+    // Track removed asset IDs with reason for permanent blur overlay
+    const [removedAssetMap, setRemovedAssetMap] = useState<Map<string, 'deleted' | 'moved'>>(new Map())
     const initialSyncDone = useRef(false)
 
     // Dynamic page title based on library name and folder
@@ -130,7 +131,7 @@ export function LibraryPage() {
                         setLibraryEncrypted(true)
                         // Check if already unlocked (10-min persistence)
                         try {
-                            const status = await api.getUnlockStatus()
+                            const status = await api.getUnlockStatus(libraryId!)
                             if (!status.unlocked) {
                                 setShowUnlockDialog(true)
                             }
@@ -177,7 +178,7 @@ export function LibraryPage() {
             loadAssets(1, searchFromUrl, false, toApiFolder(folderFromUrl), getSubfolders(folderFromUrl))
                 .then(() => {
                     // Check for tag conflicts after initial load
-                    api.getTagConflicts().then((conflicts) => {
+                    api.getTagConflicts(libraryId!).then((conflicts) => {
                         if (conflicts && conflicts.length > 0) {
                             setTagConflicts(conflicts)
                             setConflictDialogOpen(true)
@@ -223,9 +224,9 @@ export function LibraryPage() {
             const resolvedSort = sort ?? sortMode
             let result: Awaited<ReturnType<typeof api.getAssets>>
             if (query) {
-                result = await api.searchAssets(query, pageNum, PAGE_SIZE, folder || undefined)
+                result = await api.searchAssets(libraryId!, query, pageNum, PAGE_SIZE, folder || undefined)
             } else {
-                result = await api.getAssets(pageNum, PAGE_SIZE, folder || undefined, subfolders, resolvedSort === "newest" ? undefined : resolvedSort)
+                result = await api.getAssets(libraryId!, pageNum, PAGE_SIZE, folder || undefined, subfolders, resolvedSort === "newest" ? undefined : resolvedSort)
             }
             setAssets((prev) => (append ? [...prev, ...result.items] : result.items))
             setTotal(result.total)
@@ -287,31 +288,49 @@ export function LibraryPage() {
         loadAssets(nextPage, searchQuery, true, toApiFolder(currentFolder), getSubfolders(currentFolder))
     }, [loading, page, searchQuery, loadAssets, currentFolder])
 
-    const handleAssetMoved = useCallback(() => {
-        setPage(1)
-        setAssets([])
+    const handleAssetMoved = useCallback((assetId?: string, reason?: 'deleted' | 'moved') => {
+        if (!assetId) {
+            // Fallback: full refresh
+            setPage(1)
+            setAssets([])
+            setTreeRefreshKey((k) => k + 1)
+            loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
+            return
+        }
+        if (reason === 'deleted' || reason === 'moved') {
+            // Keep the card in grid with permanent blur overlay
+            setRemovedAssetMap((prev) => new Map(prev).set(assetId, reason!))
+        }
+        // Always refresh directory tree counts after any change
         setTreeRefreshKey((k) => k + 1)
-        loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
     }, [loadAssets, searchQuery, currentFolder])
 
     const handleMoveAsset = useCallback(async (assetId: string, targetFolder: string) => {
+        // Show blur overlay immediately
+        setRemovedAssetMap((prev) => new Map(prev).set(assetId, 'moved'))
         try {
-            await api.moveAsset(assetId, targetFolder)
+            await api.moveAsset(assetId, targetFolder, libraryId!)
             toaster.create({
                 title: "Asset moved",
                 description: `Moved to ${targetFolder || "root"}`,
                 type: "success",
             })
-            handleAssetMoved()
+            // Refresh directory tree counts — grid stays unchanged
             setTreeRefreshKey((k) => k + 1)
         } catch {
+            // Move failed — remove blur overlay
+            setRemovedAssetMap((prev) => {
+                const next = new Map(prev)
+                next.delete(assetId)
+                return next
+            })
             toaster.create({
                 title: "Move failed",
                 description: "Could not move asset to that folder.",
                 type: "error",
             })
         }
-    }, [handleAssetMoved, toaster])
+    }, [toaster])
 
     const handleCategorizeSave = useCallback(() => {
         setPage(1)
@@ -322,9 +341,10 @@ export function LibraryPage() {
     const handleRescan = useCallback(async () => {
         setScanning(true)
         try {
-            const result = await api.scanAssets()
+            const result = await api.scanAssets(libraryId!)
             setPage(1)
             setAssets([])
+            setTreeRefreshKey((k) => k + 1)
             loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
 
             // Check for tag conflicts
@@ -343,12 +363,12 @@ export function LibraryPage() {
         } finally {
             setScanning(false)
         }
-    }, [loadAssets, searchQuery, currentFolder, toaster])
+    }, [loadAssets, searchQuery, currentFolder, toaster, setTreeRefreshKey])
 
     const handleResolveConflicts = useCallback(async (resolutions: { tagValue: string; chosenType: string }[]) => {
         setResolvingConflicts(true)
         try {
-            await api.resolveTagConflicts(resolutions)
+            await api.resolveTagConflicts(libraryId!, resolutions)
             setConflictDialogOpen(false)
             setTagConflicts([])
             // Reload assets to reflect changes
@@ -372,7 +392,7 @@ export function LibraryPage() {
         setDecrypting(true)
         setDecryptError("")
         try {
-            const result = await api.decryptLibrary(password)
+            const result = await api.decryptLibrary(libraryId!, password)
             setLibraryEncrypted(false)
             setShowDecryptDialog(false)
             toaster.create({
@@ -403,7 +423,7 @@ export function LibraryPage() {
         setEncrypting(true)
         setEncryptError("")
         try {
-            const result = await api.encryptLibrary(encryptPassword)
+            const result = await api.encryptLibrary(libraryId!, encryptPassword)
             setLibraryEncrypted(true)
             setShowEncryptDialog(false)
             setEncryptPassword("")
@@ -510,9 +530,10 @@ export function LibraryPage() {
                 decrypting={decrypting}
                 onEncrypt={() => setShowEncryptDialog(true)}
                 encrypting={encrypting}
+                toaster={toaster}
                 onLock={async () => {
                     try {
-                        await api.lockLibrary();
+                        await api.lockLibrary(libraryId!);
                         sessionStorage.removeItem("collect-unlock-token");
                         toaster.create({
                             title: "Library locked",
@@ -548,7 +569,7 @@ export function LibraryPage() {
                     display={{ base: "none", md: "block" }}
                     py="2"
                 >
-                    <DirectoryTree currentFolder={currentFolder} onFolderChange={handleFolderChange} onMoveAsset={handleMoveAsset} refreshKey={treeRefreshKey} />
+                    <DirectoryTree currentFolder={currentFolder} onFolderChange={handleFolderChange} onMoveAsset={handleMoveAsset} refreshKey={treeRefreshKey} libraryId={libraryId!} />
                 </Box>
 
                 {/* Center: Masonry */}
@@ -561,11 +582,12 @@ export function LibraryPage() {
                         onSelectAsset={handleSelectAsset}
                         currentFolder={currentFolder}
                         searchQuery={searchQuery}
+                        removedAssetIds={removedAssetMap}
                     />
                 </Box>
 
                 {/* Right: Docked Sidebar (desktop only) */}
-                {selectedAssetId && <SidebarPanel assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={handleAssetMoved} />}
+                {selectedAssetId && <SidebarPanel assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />}
             </Box>
 
             <AddAssetDialog
@@ -573,8 +595,9 @@ export function LibraryPage() {
                 onOpenChange={setAddDialogOpen}
                 toaster={toaster as CustomToaster}
                 isMobile={isMobile}
-                onAssetsAdded={() => { setPage(1); setAssets([]); loadAssets(1, searchQuery, false, currentFolder || undefined, getSubfolders(currentFolder)) }}
+                onAssetsAdded={() => { setPage(1); setAssets([]); setTreeRefreshKey((k) => k + 1); loadAssets(1, searchQuery, false, currentFolder || undefined, getSubfolders(currentFolder)) }}
                 currentFolder={currentFolder}
+                libraryId={libraryId}
             />
 
             {/* Mobile directory drawer (bottom) */}
@@ -604,6 +627,7 @@ export function LibraryPage() {
                                     }}
                                     onMoveAsset={handleMoveAsset}
                                     refreshKey={treeRefreshKey}
+                                    libraryId={libraryId!}
                                 />
                             </Drawer.Body>
                         </Drawer.Content>
@@ -629,7 +653,7 @@ export function LibraryPage() {
                                 </HStack>
                             </Drawer.Header>
                             <Drawer.Body p="4">
-                                <Sidebar assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={handleAssetMoved} />
+                                <Sidebar assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />
                             </Drawer.Body>
                         </Drawer.Content>
                     </Drawer.Positioner>
@@ -695,10 +719,10 @@ export function LibraryPage() {
                                         setUnlocking(true)
                                         setUnlockError("")
                                         try {
-                                            await api.unlockLibrary(libraryId!, unlockPassword)
+                                            await api.unlockLibrary(libraryId!, libraryId!, unlockPassword)
                                             setShowUnlockDialog(false)
                                             // Reload assets after unlock
-                                            const info = await api.getLibraryInfo()
+                                            const info = await api.getLibraryInfo(libraryId!)
                                             setLibraryName(info.name)
                                             setLibraryFullId(info.id)
                                             setLibraryPath(info.path)
@@ -843,7 +867,7 @@ function SidebarPanel({ assetId, onClose, toaster, onTagClick, selectedTags, onR
     toaster: CustomToaster
     onTagClick?: (value: string) => void
     selectedTags?: string[]
-    onRefreshRequested?: () => void
+    onRefreshRequested?: (assetId?: string, reason?: 'deleted' | 'moved') => void
 }) {
     const panelRef = useRef<HTMLDivElement>(null)
     const dragging = useRef(false)

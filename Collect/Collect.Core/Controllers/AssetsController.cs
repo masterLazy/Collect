@@ -30,6 +30,9 @@ public class AssetsController : ControllerBase
     [HttpPost("scan")]
     public async Task<IActionResult> Scan()
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         try
         {
             var result = await _assetService.ScanAsync();
@@ -97,6 +100,17 @@ public class AssetsController : ControllerBase
 
         // Prevent browser caching — ensures locked library thumbnails aren't served from cache
         Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+
+        if (_libraryService.IsEncryptedLibrary())
+        {
+            var encryptionKey = _libraryService.GetEncryptionKey(GetUnlockToken());
+            if (encryptionKey is null)
+                return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
+            var decrypted = _encryptionService.ReadAndDecryptFile(thumbPath, encryptionKey);
+            return File(decrypted, "image/webp");
+        }
+
         return PhysicalFile(thumbPath, "image/webp");
     }
 
@@ -141,6 +155,9 @@ public class AssetsController : ControllerBase
     [HttpPut("{id}/tags")]
     public async Task<IActionResult> UpdateTags(string id, [FromBody] UpdateTagsRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var success = await _assetService.UpdateTagsAsync(id, request.Tags);
         if (!success)
             return NotFound(new { error = $"Asset '{id}' not found." });
@@ -181,6 +198,9 @@ public class AssetsController : ControllerBase
     [HttpGet("tag-conflicts")]
     public async Task<IActionResult> GetTagConflicts()
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var conflicts = await _assetService.GetTagConflictsAsync();
         return Ok(conflicts);
     }
@@ -218,6 +238,9 @@ public class AssetsController : ControllerBase
     [HttpPost("{id}/move")]
     public async Task<IActionResult> MoveAsset(string id, [FromBody] MoveAssetRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var result = await _assetService.MoveAssetAsync(id, request.TargetFolder);
         if (result is null)
             return NotFound(new { error = $"Asset '{id}' not found or target path already exists." });
@@ -239,6 +262,9 @@ public class AssetsController : ControllerBase
         [FromForm(Name = "tags")] string? tags = null,
         [FromForm(Name = "tagsJson")] string? tagsJson = null)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         if (files is null || files.Count == 0)
             return BadRequest(new { error = "No files provided." });
 
@@ -273,6 +299,9 @@ public class AssetsController : ControllerBase
     [HttpPost("resolve-tag-conflicts")]
     public async Task<IActionResult> ResolveTagConflicts([FromBody] ResolveTagConflictsRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var success = await _assetService.ResolveTagConflictsAsync(request.Resolutions);
         return Ok(new { success });
     }
@@ -284,6 +313,9 @@ public class AssetsController : ControllerBase
     [HttpPost("categorize")]
     public async Task<IActionResult> CategorizeTags([FromBody] BatchCategorizeRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var affected = await _assetService.CategorizeTagsAsync(request);
         return Ok(new { affectedAssets = affected });
     }
@@ -295,6 +327,9 @@ public class AssetsController : ControllerBase
     [HttpPost("rename-category")]
     public async Task<IActionResult> RenameCategory([FromBody] RenameCategoryRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var success = await _assetService.RenameCategoryAsync(request.OldType, request.NewType);
         return Ok(new { success });
     }
@@ -306,6 +341,9 @@ public class AssetsController : ControllerBase
     [HttpPost("delete-category")]
     public async Task<IActionResult> DeleteCategory([FromBody] DeleteCategoryRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var success = await _assetService.DeleteCategoryAsync(request.Type);
         return Ok(new { success });
     }
@@ -317,6 +355,9 @@ public class AssetsController : ControllerBase
     [HttpPost("rename-tag")]
     public async Task<IActionResult> RenameTag([FromBody] RenameTagRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var success = await _assetService.RenameTagValueAsync(request.OldValue, request.NewValue);
         return Ok(new { success });
     }
@@ -328,6 +369,9 @@ public class AssetsController : ControllerBase
     [HttpDelete("{id}")]
     public async Task<IActionResult> DeleteAsset(string id)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var success = await _assetService.DeleteAssetAsync(id);
         if (!success)
             return NotFound(new { error = $"Asset '{id}' not found." });
@@ -342,6 +386,9 @@ public class AssetsController : ControllerBase
     [HttpPost("delete-tag")]
     public async Task<IActionResult> DeleteTag([FromBody] DeleteTagRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var success = await _assetService.DeleteTagValueAsync(request.Value);
         return Ok(new { success });
     }

@@ -207,6 +207,9 @@ public class LibraryController : ControllerBase
     [HttpPost("create-directory")]
     public async Task<IActionResult> CreateDirectory([FromBody] CreateDirectoryRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var path = await _libraryService.CreateDirectoryAsync(request.RelativePath);
         return Ok(new { path });
     }
@@ -218,6 +221,9 @@ public class LibraryController : ControllerBase
     [HttpPost("rename-directory")]
     public async Task<IActionResult> RenameDirectory([FromBody] RenameDirectoryRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         try
         {
             var path = await _libraryService.RenameDirectoryAsync(request.RelativePath, request.NewName);
@@ -240,6 +246,9 @@ public class LibraryController : ControllerBase
     [HttpPost("delete-directory")]
     public async Task<IActionResult> DeleteDirectory([FromBody] DeleteDirectoryRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var success = await _libraryService.DeleteDirectoryAsync(request.RelativePath);
         if (!success)
             return NotFound(new { error = $"Directory not found: {request.RelativePath}" });
@@ -276,6 +285,9 @@ public class LibraryController : ControllerBase
     [HttpPost("category-order")]
     public async Task<IActionResult> SetCategoryOrder([FromBody] CategoryOrderRequest request)
     {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         await _libraryService.SetCategoryOrderAsync(request.Order);
         return Ok(new { success = true });
     }

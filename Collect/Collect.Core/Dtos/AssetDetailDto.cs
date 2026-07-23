@@ -19,4 +19,9 @@ public class AssetDetailDto
     public string ImageUrl { get; set; } = string.Empty;
     public DateTime ImportedAt { get; set; }
     public DateTime? LastModified { get; set; }
+
+    /// <summary>
+    /// Computed color palette for this asset. Null until computed on demand.
+    /// </summary>
+    public ColorPalette? Palette { get; set; }
 }

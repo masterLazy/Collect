@@ -25,6 +25,7 @@ interface AddAssetDialogProps {
     isMobile?: boolean
     onAssetsAdded: () => void
     currentFolder?: string
+    libraryId?: string
 }
 
 interface FileEntry {
@@ -68,7 +69,7 @@ function formatSize(bytes: number): string {
     return bytes + " B"
 }
 
-export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssetsAdded, currentFolder = "" }: AddAssetDialogProps) {
+export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssetsAdded, currentFolder = "", libraryId }: AddAssetDialogProps) {
     const [files, setFiles] = useState<FileEntry[]>([])
     const [targetDir, setTargetDir] = useState("Uncategorized")
     const [uploading, setUploading] = useState(false)
@@ -145,7 +146,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
 
         setUploading(true)
         try {
-            const result: UploadResult = await api.uploadAssets(readyFiles, targetDir, keepFilename, batchTags)
+            const result: UploadResult = await api.uploadAssets(libraryId ?? "", readyFiles, targetDir, keepFilename, batchTags)
             toaster.create({
                 title: "Upload complete",
                 description: result.added + " file(s) added" + (result.errors.length > 0 ? ", " + result.errors.length + " error(s)" : ""),
@@ -224,6 +225,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
                 selectedPath={targetDir}
                 onSelect={(path) => setTargetDir(path)}
                 title="Select Target Directory"
+                libraryId={libraryId!}
             />
 
             {/* Keep filename checkbox */}
@@ -246,6 +248,7 @@ export function AddAssetDialog({ open, onOpenChange, toaster, isMobile, onAssets
                 tags={batchTags}
                 assetId="batch"
                 onTagsChange={setBatchTags}
+                libraryId={libraryId!}
             />
         </Box>
     )

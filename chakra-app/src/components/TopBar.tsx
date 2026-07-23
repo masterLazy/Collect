@@ -2,6 +2,8 @@ import { Box, Button, HStack, IconButton, Menu, Popover, Portal, Text } from "@c
 import { useEffect, useRef, useState } from "react"
 import { SearchInput } from "./SearchInput"
 import { TagFilterModal } from "./TagFilterModal"
+import { copyToClipboard } from "../services/clipboard"
+import type { CustomToaster } from "./CustomToast"
 
 export type SortMode = "newest" | "name" | "random"
 
@@ -33,6 +35,7 @@ interface TopBarProps {
     onLock?: () => void
     sortMode?: SortMode
     onSortChange?: (mode: SortMode) => void
+    toaster: CustomToaster
 }
 
 function PlusIcon() {
@@ -92,12 +95,13 @@ function MoreIcon() {
 function CopyButton({ value }: { value: string }) {
     const [copied, setCopied] = useState(false)
 
-    const handleCopy = (e: React.MouseEvent) => {
+    const handleCopy = async (e: React.MouseEvent) => {
         e.stopPropagation()
-        navigator.clipboard.writeText(value).then(() => {
+        const ok = await copyToClipboard(value)
+        if (ok) {
             setCopied(true)
             setTimeout(() => setCopied(false), 1500)
-        }).catch(() => { })
+        }
     }
 
     return (
@@ -156,6 +160,7 @@ export function TopBar({
     onLock,
     sortMode = "newest",
     onSortChange,
+    toaster,
 }: TopBarProps) {
     // Mobile search bar visibility:
     // - If alwaysShowSearch is on: use scroll-based fade
@@ -328,8 +333,8 @@ export function TopBar({
                 {currentFolder !== undefined && currentFolder !== "" && (
                     <HStack
                         gap="1"
-                        flex="1"
                         minW="0"
+                        flexShrink="1"
                         fontSize="sm"
                         color="fg.muted"
                     >
@@ -393,7 +398,7 @@ export function TopBar({
 
                 {/* Desktop: SearchInput stays in first row */}
                 <Box flex="1" display={{ base: "none", md: "block" }}>
-                    <SearchInput value={searchQuery} onChange={onSearchChange} />
+                    <SearchInput value={searchQuery} onChange={onSearchChange} libraryId={libraryId} />
                 </Box>
 
                 {/* Action buttons */}
@@ -466,6 +471,8 @@ export function TopBar({
                         onTagsChange={onTagsChange}
                         onCategorizeSave={onCategorizeSave}
                         isMobile={isMobile}
+                        toaster={toaster}
+                        libraryId={libraryId}
                     />
 
                     {/* More menu (desktop & mobile) */}
@@ -602,7 +609,7 @@ export function TopBar({
                 css={{ transition: "opacity 0.2s ease" }}
                 shadow={searchVisible ? "md" : "none"}
             >
-                <SearchInput value={searchQuery} onChange={onSearchChange} />
+                <SearchInput value={searchQuery} onChange={onSearchChange} libraryId={libraryId} />
             </Box>
         </Box>
     )

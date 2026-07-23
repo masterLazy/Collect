@@ -6,7 +6,7 @@ namespace Collect.Core.Models;
 /// </summary>
 public class Asset
 {
-    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Id { get; set; } = string.Empty;
     public string FileName { get; set; } = string.Empty;
     public string RelativePath { get; set; } = string.Empty;
     public long FileSize { get; set; }
@@ -16,6 +16,12 @@ public class Asset
     public List<AssetTag> Tags { get; set; } = new();
     public DateTime ImportedAt { get; set; } = DateTime.UtcNow;
     public DateTime? LastModified { get; set; }
+
+    /// <summary>
+    /// Computed color palette for this asset. Populated lazily on first detail request.
+    /// Null until explicitly computed via <see cref="Services.IAssetService.ComputePaletteAsync"/>.
+    /// </summary>
+    public ColorPalette? Palette { get; set; }
 }
 
 /// <summary>

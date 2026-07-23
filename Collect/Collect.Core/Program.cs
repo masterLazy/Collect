@@ -11,6 +11,7 @@ builder.Services.AddSingleton<ILibraryService, LibraryService>();
 builder.Services.AddSingleton<IAssetService, AssetService>();
 builder.Services.AddSingleton<ITagService, TagService>();
 builder.Services.AddSingleton<IThumbnailService, ThumbnailService>();
+builder.Services.AddHttpContextAccessor();
 
 // ── CORS ──────────────────────────────────────────────
 builder.Services.AddCors(options =>
@@ -31,6 +32,7 @@ var app = builder.Build();
 
 // ── Middleware Pipeline ───────────────────────────────
 app.UseMiddleware<ErrorHandlingMiddleware>();
+app.UseMiddleware<LibraryContextMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {

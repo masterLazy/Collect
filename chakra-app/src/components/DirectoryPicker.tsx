@@ -130,10 +130,12 @@ export function DirectoryTreePicker({
     selectedPath,
     onSelect,
     maxHeight = "300px",
+    libraryId,
 }: {
     selectedPath: string
     onSelect: (path: string) => void
     maxHeight?: string
+    libraryId: string
 }) {
     const [tree, setTree] = useState<DirectoryNode | null>(null)
     const [loading, setLoading] = useState(true)
@@ -142,7 +144,7 @@ export function DirectoryTreePicker({
 
     const loadTree = () => {
         setLoading(true)
-        api.getDirectoryTree().then((data) => setTree(data.root)).catch(() => { }).finally(() => setLoading(false))
+        api.getDirectoryTree(libraryId).then((data) => setTree(data.root)).catch(() => { }).finally(() => setLoading(false))
     }
 
     useEffect(() => {
@@ -155,7 +157,7 @@ export function DirectoryTreePicker({
         try {
             const parentFolder = selectedPath === "Uncategorized" ? "" : selectedPath
             const relativePath = parentFolder ? `${parentFolder}/${name}` : name
-            await api.createDirectory(relativePath)
+            await api.createDirectory(libraryId, relativePath)
             setNewFolderName("")
             setCreatingSubfolder(false)
             loadTree()
@@ -306,12 +308,14 @@ export function DirectoryPicker({
     selectedPath,
     onSelect,
     title = "Select Directory",
+    libraryId,
 }: {
     open: boolean
     onOpenChange: (open: boolean) => void
     selectedPath: string
     onSelect: (path: string) => void
     title?: string
+    libraryId: string
 }) {
     return (
         <Dialog.Root open={open} onOpenChange={(e: { open: boolean }) => onOpenChange(e.open)}>
@@ -326,6 +330,7 @@ export function DirectoryPicker({
                             <DirectoryTreePicker
                                 selectedPath={selectedPath}
                                 onSelect={(path) => { onSelect(path); onOpenChange(false) }}
+                                libraryId={libraryId}
                             />
                             <Text fontSize="xs" color="fg.subtle" mt="2">
                                 Current: {selectedPath || "Root"}
