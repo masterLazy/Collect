@@ -16,6 +16,12 @@ public class Asset
     public List<AssetTag> Tags { get; set; } = new();
     public DateTime ImportedAt { get; set; } = DateTime.UtcNow;
     public DateTime? LastModified { get; set; }
+
+    /// <summary>
+    /// Computed color palette for this asset. Populated lazily on first detail request.
+    /// Null until explicitly computed via <see cref="Services.IAssetService.ComputePaletteAsync"/>.
+    /// </summary>
+    public ColorPalette? Palette { get; set; }
 }
 
 /// <summary>

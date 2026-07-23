@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react"
 import { Box, Button, Field, HStack, Input, Stack, Text } from "@chakra-ui/react"
 import { TagBadge } from "./TagBadge"
 import { api } from "../services/api"
+import { copyToClipboard } from "../services/clipboard"
 import type { AssetDetailDto, AssetTag } from "../types"
 import type { CustomToaster } from "./CustomToast"
 
@@ -275,12 +276,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
         const tagString = tags
             .map(t => t.type ? `[${t.type}]${t.value}` : t.value)
             .join("-")
-        try {
-            await navigator.clipboard.writeText(tagString)
-            toaster?.create({ title: "Tags copied", type: "success" })
-        } catch {
-            toaster?.create({ title: "Failed to copy tags", type: "error" })
-        }
+        await copyToClipboard(tagString, toaster)
     }
 
     const handleKeyDown = (e: React.KeyboardEvent) => {

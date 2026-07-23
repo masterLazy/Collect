@@ -15,8 +15,12 @@ public class ThumbnailService : IThumbnailService
         _encryptionService = encryptionService;
     }
 
-    public bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400, byte[]? encryptionKey = null)
+    public bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400, byte[]? encryptionKey = null, Action<SKBitmap>? onNewThumbnail = null)
     {
+        SKBitmap? resized = null;
+        bool generated;
+
+        // Decode and generate the thumbnail under the lock (disk I/O + Skia)
         lock (_lock)
         {
             try
@@ -25,20 +29,19 @@ public class ThumbnailService : IThumbnailService
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-                bool generated;
                 if (encryptionKey is not null)
                 {
                     var decrypted = _encryptionService.ReadAndDecryptFile(sourceFilePath, encryptionKey);
                     using var original = SKBitmap.Decode(decrypted);
                     if (original == null) return false;
-                    generated = GenerateAndSaveThumbnail(original, outputPath, maxWidth);
+                    (generated, resized) = GenerateAndSaveThumbnail(original, outputPath, maxWidth);
                 }
                 else
                 {
                     using var input = File.OpenRead(sourceFilePath);
                     using var original = SKBitmap.Decode(input);
                     if (original == null) return false;
-                    generated = GenerateAndSaveThumbnail(original, outputPath, maxWidth);
+                    (generated, resized) = GenerateAndSaveThumbnail(original, outputPath, maxWidth);
                 }
 
                 if (generated && encryptionKey is not null)
@@ -47,17 +50,40 @@ public class ThumbnailService : IThumbnailService
                     var encrypted = _encryptionService.Encrypt(plaintext, encryptionKey);
                     File.WriteAllBytes(outputPath, encrypted);
                 }
-
-                return generated;
             }
             catch
             {
+                resized?.Dispose();
                 return false;
             }
         }
+
+        // Palette computation outside the lock — CPU-heavy K-means can run
+        // in parallel with other thumbnail requests
+        if (generated && onNewThumbnail != null && resized is not null)
+        {
+            try
+            {
+                onNewThumbnail(resized);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Palette callback failed: {ex.Message}");
+            }
+            finally
+            {
+                resized.Dispose();
+            }
+        }
+        else
+        {
+            resized?.Dispose();
+        }
+
+        return generated;
     }
 
-    public string? GetOrCreateThumbnail(string libraryPath, string sourceFilePath, string assetId, byte[]? encryptionKey = null)
+    public string? GetOrCreateThumbnail(string libraryPath, string sourceFilePath, string assetId, byte[]? encryptionKey = null, Action<SKBitmap>? onNewThumbnail = null)
     {
         if (!File.Exists(sourceFilePath))
             return null;
@@ -70,9 +96,11 @@ public class ThumbnailService : IThumbnailService
         if (File.Exists(thumbPath))
             return thumbPath;
 
-        return TryGenerateThumbnail(sourceFilePath, thumbPath, ThumbnailMaxWidth, encryptionKey)
-            ? thumbPath
-            : null;
+        // Generate thumbnail; if successful and a callback is provided, invoke it with the resized bitmap
+        if (!TryGenerateThumbnail(sourceFilePath, thumbPath, ThumbnailMaxWidth, encryptionKey, onNewThumbnail))
+            return null;
+
+        return thumbPath;
     }
 
     public void DeleteThumbnail(string libraryPath, string assetId)
@@ -108,16 +136,16 @@ public class ThumbnailService : IThumbnailService
         }
     }
 
-    private static bool GenerateAndSaveThumbnail(SKBitmap original, string outputPath, int maxWidth)
+    private static (bool Success, SKBitmap? Resized) GenerateAndSaveThumbnail(SKBitmap original, string outputPath, int maxWidth)
     {
         int newWidth = Math.Min(maxWidth, original.Width);
         int newHeight = (int)((double)newWidth / original.Width * original.Height);
 
-        using var resized = original.Resize(
+        var resized = original.Resize(
             new SKImageInfo(newWidth, newHeight),
             new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear));
 
-        if (resized == null) return false;
+        if (resized == null) return (false, null);
 
         using var image = SKImage.FromBitmap(resized);
         using var data = image.Encode(SKEncodedImageFormat.Webp, WebpQuality);
@@ -125,6 +153,6 @@ public class ThumbnailService : IThumbnailService
         using var output = File.OpenWrite(outputPath);
         data.SaveTo(output);
 
-        return true;
+        return (true, resized);
     }
 }

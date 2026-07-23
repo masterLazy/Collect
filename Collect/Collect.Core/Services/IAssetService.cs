@@ -131,6 +131,13 @@ public interface IAssetService
     Task<bool> DeleteTagValueAsync(string value);
 
     /// <summary>
+    /// Compute (or retrieve cached) color palette for the specified asset.
+    /// Returns null if the asset is not found. The palette is computed lazily
+    /// using K-means clustering on the image pixels, cached in .collect/palettes.json.
+    /// </summary>
+    Task<ColorPalette?> ComputePaletteAsync(string id);
+
+    /// <summary>
     /// Invalidate the in-memory asset cache so the next fetch triggers a fresh scan.
     /// Used after unlocking an encrypted library to re-extract dimensions with the decryption key.
     /// </summary>

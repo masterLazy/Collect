@@ -1,3 +1,5 @@
+using SkiaSharp;
+
 namespace Collect.Core.Services;
 
 /// <summary>
@@ -10,15 +12,20 @@ public interface IThumbnailService
     /// Generate a thumbnail from the source file and save it to the output path.
     /// Returns true if the thumbnail was successfully generated.
     /// When encryptionKey is provided, the source file is decrypted before processing.
+    /// When <paramref name="onNewThumbnail"/> is set, it is called with the resized bitmap
+    /// after generation so callers can perform additional processing (e.g. palette extraction).
     /// </summary>
-    bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400, byte[]? encryptionKey = null);
+    bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400, byte[]? encryptionKey = null, Action<SKBitmap>? onNewThumbnail = null);
 
     /// <summary>
     /// Get or create a thumbnail for the given asset.
     /// If a thumbnail for that assetId already exists, returns its path without regenerating.
     /// When encryptionKey is provided, the source file is decrypted before processing.
+    /// When a new thumbnail is generated, <paramref name="onNewThumbnail"/> is called with the
+    /// resized bitmap (before saving to disk) so callers can perform additional processing,
+    /// such as color palette extraction.
     /// </summary>
-    string? GetOrCreateThumbnail(string libraryPath, string sourceFilePath, string assetId, byte[]? encryptionKey = null);
+    string? GetOrCreateThumbnail(string libraryPath, string sourceFilePath, string assetId, byte[]? encryptionKey = null, Action<SKBitmap>? onNewThumbnail = null);
 
     /// <summary>
     /// Delete the thumbnail for a given asset ID, if it exists.

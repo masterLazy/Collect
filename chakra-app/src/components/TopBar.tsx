@@ -2,6 +2,7 @@ import { Box, Button, HStack, IconButton, Menu, Popover, Portal, Text } from "@c
 import { useEffect, useRef, useState } from "react"
 import { SearchInput } from "./SearchInput"
 import { TagFilterModal } from "./TagFilterModal"
+import { copyToClipboard } from "../services/clipboard"
 import type { CustomToaster } from "./CustomToast"
 
 export type SortMode = "newest" | "name" | "random"
@@ -94,12 +95,13 @@ function MoreIcon() {
 function CopyButton({ value }: { value: string }) {
     const [copied, setCopied] = useState(false)
 
-    const handleCopy = (e: React.MouseEvent) => {
+    const handleCopy = async (e: React.MouseEvent) => {
         e.stopPropagation()
-        navigator.clipboard.writeText(value).then(() => {
+        const ok = await copyToClipboard(value)
+        if (ok) {
             setCopied(true)
             setTimeout(() => setCopied(false), 1500)
-        }).catch(() => { })
+        }
     }
 
     return (

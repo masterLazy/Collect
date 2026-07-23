@@ -436,7 +436,24 @@ public partial class AssetService : IAssetService
     {
         await EnsureScannedAsync();
         var asset = _assets.FirstOrDefault(a => a.Id == id);
-        return asset is null ? null : MapToDetailDto(asset);
+        if (asset is null) return null;
+
+        // Lazy palette computation: if no cached palette exists, compute on demand
+        if (asset.Palette is null)
+        {
+            var libraryPath = _libraryService.GetLibraryPath();
+            if (libraryPath is not null)
+            {
+                var store = PalettesStore.Load(libraryPath);
+                if (!store.Palettes.ContainsKey(id))
+                {
+                    // Palette not in store either — compute it now
+                    await ComputePaletteAsync(id);
+                }
+            }
+        }
+
+        return MapToDetailDto(asset);
     }
 
     public async Task<Asset?> GetAssetAsync(string id)
@@ -1106,7 +1123,26 @@ public partial class AssetService : IAssetService
             return null;
 
         var encryptionKey = _libraryService.GetEncryptionKey();
-        return _thumbnailService.GetOrCreateThumbnail(libraryPath, sourcePath, asset.Id, encryptionKey);
+
+        // When a new thumbnail is generated, also compute the color palette from it
+        return _thumbnailService.GetOrCreateThumbnail(libraryPath, sourcePath, asset.Id, encryptionKey, resized =>
+        {
+            try
+            {
+                var palette = ColorPaletteHelper.ComputeFromBitmap(resized);
+                if (palette is not null)
+                {
+                    var store = PalettesStore.Load(libraryPath);
+                    store.Palettes[id] = palette;
+                    store.Save(libraryPath);
+                    asset.Palette = palette;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to compute color palette from thumbnail for asset {AssetId}", id);
+            }
+        });
     }
 
     // ──────────────────────────────────────────────
@@ -1331,6 +1367,27 @@ public partial class AssetService : IAssetService
 
     private AssetDetailDto MapToDetailDto(Asset asset)
     {
+        // Lazily load palette from store if not already cached on the asset
+        if (asset.Palette is null)
+        {
+            try
+            {
+                var libraryPath = _libraryService.GetLibraryPath();
+                if (libraryPath is not null)
+                {
+                    var store = PalettesStore.Load(libraryPath);
+                    if (store.Palettes.TryGetValue(asset.Id, out var cached))
+                    {
+                        asset.Palette = cached;
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort: if palette loading fails, continue without it
+            }
+        }
+
         var libraryId = _libraryService.GetLibraryId();
         var query = libraryId is not null ? $"?libraryId={libraryId}" : "";
         return new AssetDetailDto
@@ -1346,7 +1403,8 @@ public partial class AssetService : IAssetService
             ThumbnailUrl = $"/api/assets/{asset.Id}/thumbnail{query}",
             ImageUrl = $"/api/assets/{asset.Id}/image{query}",
             ImportedAt = asset.ImportedAt,
-            LastModified = asset.LastModified
+            LastModified = asset.LastModified,
+            Palette = asset.Palette
         };
     }
 
@@ -2301,6 +2359,86 @@ public partial class AssetService : IAssetService
             ".tiff" or ".tif" => "image/tiff",
             _ => "application/octet-stream"
         };
+    }
+
+    // ──────────────────────────────────────────────
+    //  Color Palette
+    // ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Get the cached color palette for an asset. Palettes are computed during thumbnail
+    /// generation and stored in .collect/palettes.json. If no cached palette exists
+    /// (e.g. for assets that already had thumbnails before this feature was added),
+    /// computes it on demand from the original image resized consistently with
+    /// the thumbnail generation pipeline (ScalePixels, not mipmap Resize).
+    /// Returns null if the asset is not found.
+    /// </summary>
+    public async Task<ColorPalette?> ComputePaletteAsync(string id)
+    {
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return null;
+
+        var asset = await GetAssetAsync(id);
+        if (asset is null) return null;
+
+        // Return cached palette if already in memory
+        if (asset.Palette is not null)
+            return asset.Palette;
+
+        var store = PalettesStore.Load(libraryPath);
+        if (store.Palettes.TryGetValue(id, out var existing))
+        {
+            asset.Palette = existing;
+            return existing;
+        }
+
+        // Not in store — compute from the original image by resizing it to
+        // thumbnail dimensions using ScalePixels (consistent with thumbnail gen).
+        // This avoids WebP lossy decode artifacts that can skew K-means results.
+        try
+        {
+            var sourcePath = Path.Combine(libraryPath, asset.RelativePath);
+            if (!File.Exists(sourcePath)) return null;
+
+            var encryptionKey = _libraryService.GetEncryptionKey();
+            SKBitmap bitmap;
+
+            if (encryptionKey is not null)
+            {
+                var decrypted = _encryptionService.ReadAndDecryptFile(sourcePath, encryptionKey);
+                using var decryptedStream = new MemoryStream(decrypted);
+                bitmap = SKBitmap.Decode(decryptedStream);
+            }
+            else
+            {
+                bitmap = SKBitmap.Decode(sourcePath);
+            }
+
+            if (bitmap is null) return null;
+
+            using (bitmap)
+            {
+                // Resize to thumbnail dimensions using same method as GenerateAndSaveThumbnail
+                int thumbWidth = Math.Min(400, bitmap.Width);
+                int thumbHeight = (int)((double)thumbWidth / bitmap.Width * bitmap.Height);
+
+                using var resized = new SKBitmap(thumbWidth, thumbHeight);
+                bitmap.ScalePixels(resized, SKSamplingOptions.Default);
+
+                var palette = ColorPaletteHelper.ComputeFromBitmap(resized);
+                if (palette is null) return null;
+
+                store.Palettes[id] = palette;
+                store.Save(libraryPath);
+                asset.Palette = palette;
+                return palette;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to compute color palette for asset {AssetId}", id);
+            return null;
+        }
     }
 
     /// <summary>

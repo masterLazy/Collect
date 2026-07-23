@@ -1,3 +1,12 @@
+export interface PaletteColor {
+    hex: string;
+    proportion: number;
+}
+
+export interface ColorPalette {
+    colors: PaletteColor[];
+}
+
 export interface AssetTag {
     type: string | null;
     value: string;
@@ -24,6 +33,7 @@ export interface AssetDetailDto {
     height: number;
     mimeType: string;
     tags: AssetTag[];
+    palette?: ColorPalette | null;
     importedAt: string;
     lastModified: string | null;
 }

@@ -16,6 +16,8 @@ import {
     Text,
 } from "@chakra-ui/react"
 import { api, API_BASE } from "../services/api"
+import { copyToClipboard } from "../services/clipboard"
+import { PaletteBar } from "./PaletteBar"
 import { TagEditor } from "./TagEditor"
 import { DirectoryTreePicker } from "./DirectoryPicker"
 import type { AssetDetailDto, AssetTag } from "../types"
@@ -165,13 +167,10 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
 
     const handleCopyPath = async () => {
         if (!asset) return
-        try {
-            await navigator.clipboard.writeText(asset.relativePath)
+        const ok = await copyToClipboard(asset.relativePath, toaster)
+        if (ok) {
             setCopiedPath(true)
-            toaster.create({ title: "Path copied", type: "success" })
             setTimeout(() => setCopiedPath(false), 2000)
-        } catch {
-            toaster.create({ title: "Failed to copy", type: "error" })
         }
     }
 
@@ -443,6 +442,14 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                     </Box>
 
                     <Separator />
+
+                    {/* Palette bar - full width row above metadata */}
+                    {asset.palette && (
+                        <Box>
+                            <Text color="fg.muted" fontSize="sm" mb="1.5">Colors</Text>
+                            <PaletteBar palette={asset.palette} />
+                        </Box>
+                    )}
 
                     {/* Metadata grid */}
                     <Box
