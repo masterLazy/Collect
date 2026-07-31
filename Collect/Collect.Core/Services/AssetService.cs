@@ -1503,25 +1503,9 @@ public partial class AssetService : IAssetService
 
         var encryptionKey = _libraryService.GetEncryptionKey();
 
-        // When a new thumbnail is generated, also compute the color palette from it
-        var thumbPath = _thumbnailService.GetOrCreateThumbnail(libraryPath, sourcePath, asset.Id, encryptionKey, resized =>
-        {
-            try
-            {
-                var palette = ColorPaletteHelper.ComputeFromBitmap(resized);
-                if (palette is not null)
-                {
-                    var store = PalettesStore.Load(libraryPath);
-                    store.Palettes[id] = palette;
-                    store.Save(libraryPath);
-                    asset.Palette = palette;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to compute color palette from thumbnail for asset {AssetId}", id);
-            }
-        });
+        // Palettes are intentionally NOT computed here: they are only computed on demand when the
+        // asset detail (sidebar) is opened, so the gallery/waterfall path stays fast.
+        var thumbPath = _thumbnailService.GetOrCreateThumbnail(libraryPath, sourcePath, asset.Id, encryptionKey);
         if (thumbPath is null)
             _logger.LogWarning("Thumbnail: generation failed for asset {Id} (source {Path}, key present: {Key})", id, sourcePath, encryptionKey is not null);
         return thumbPath;

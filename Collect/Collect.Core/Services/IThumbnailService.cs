@@ -1,5 +1,3 @@
-using SkiaSharp;
-
 namespace Collect.Core.Services;
 
 /// <summary>
@@ -12,20 +10,19 @@ public interface IThumbnailService
     /// Generate a thumbnail from the source file and save it to the output path.
     /// Returns true if the thumbnail was successfully generated.
     /// When encryptionKey is provided, the source file is decrypted before processing.
-    /// When <paramref name="onNewThumbnail"/> is set, it is called with the resized bitmap
-    /// after generation so callers can perform additional processing (e.g. palette extraction).
+    /// Note: this method does NOT perform its own locking. Callers (e.g. GetOrCreateThumbnail)
+    /// are responsible for serializing generation of the same output path.
     /// </summary>
-    bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400, byte[]? encryptionKey = null, Action<SKBitmap>? onNewThumbnail = null);
+    bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400, byte[]? encryptionKey = null);
 
     /// <summary>
     /// Get or create a thumbnail for the given asset.
     /// If a thumbnail for that assetId already exists, returns its path without regenerating.
     /// When encryptionKey is provided, the source file is decrypted before processing.
-    /// When a new thumbnail is generated, <paramref name="onNewThumbnail"/> is called with the
-    /// resized bitmap (before saving to disk) so callers can perform additional processing,
-    /// such as color palette extraction.
+    /// Generation is deduplicated per asset and bounded by an internal concurrency gate so
+    /// multiple cold thumbnails are processed in parallel without unbounded CPU usage.
     /// </summary>
-    string? GetOrCreateThumbnail(string libraryPath, string sourceFilePath, string assetId, byte[]? encryptionKey = null, Action<SKBitmap>? onNewThumbnail = null);
+    string? GetOrCreateThumbnail(string libraryPath, string sourceFilePath, string assetId, byte[]? encryptionKey = null);
 
     /// <summary>
     /// Delete the thumbnail for a given asset ID, if it exists.
