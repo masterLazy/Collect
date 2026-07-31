@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using Collect.Core.Models;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 
 namespace Collect.Core.Services;
 
@@ -24,18 +25,21 @@ public class LibraryService : ILibraryService
 
     private readonly IEncryptionService _encryptionService;
     private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly ILogger<LibraryService> _logger;
     private readonly SemaphoreSlim _fileLock = new(1, 1);
+    private readonly SemaphoreSlim _registryLock = new(1, 1);
 
     private readonly ConcurrentDictionary<string, UnlockSession> _sessions = new();
     // All keys ever created — never cleared, used for repair decryption
     private readonly List<byte[]> _allSessionKeys = new();
 
-    private record UnlockSession(byte[] EncryptionKey, DateTime UnlockedAt);
+    private record UnlockSession(byte[] EncryptionKey, DateTime UnlockedAt, string LibraryPath);
 
-    public LibraryService(IEncryptionService encryptionService, IHttpContextAccessor httpContextAccessor)
+    public LibraryService(IEncryptionService encryptionService, IHttpContextAccessor httpContextAccessor, ILogger<LibraryService> logger)
     {
         _encryptionService = encryptionService;
         _httpContextAccessor = httpContextAccessor;
+        _logger = logger;
     }
 
     public async Task<LibraryInfo> InitializeAsync(string path, string? name = null, string? password = null)
@@ -46,61 +50,93 @@ public class LibraryService : ILibraryService
 
         var infoPath = Path.Combine(collectDir, "library.json");
 
-        LibraryInfo info;
-
-        // Check if this path already has a library
-        if (File.Exists(infoPath))
+        await _fileLock.WaitAsync();
+        try
         {
-            // Load existing library - don't overwrite settings
-            var json = await File.ReadAllTextAsync(infoPath);
-            var existingInfo = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
-            if (existingInfo is not null)
+            LibraryInfo info;
+
+            // Check if this path already has a library
+            if (File.Exists(infoPath))
             {
-                existingInfo.Path = path; // ensure path is up to date
-                // Ensure existing library has an Id (backfill for older libraries)
-                if (string.IsNullOrEmpty(existingInfo.Id))
+                // Load existing library - don't overwrite settings
+                var json = await ReadTextFileSafelyAsync(infoPath);
+                var existingInfo = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+                if (existingInfo is not null)
                 {
-                    existingInfo.Id = Guid.NewGuid().ToString("N");
-                    await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(existingInfo, JsonOptions));
+                    existingInfo.Path = path; // ensure path is up to date
+                    // Ensure existing library has an Id (backfill for older libraries)
+                    if (string.IsNullOrEmpty(existingInfo.Id))
+                    {
+                        existingInfo.Id = Guid.NewGuid().ToString("N");
+                        await WriteTextFileSafelyAsync(infoPath, JsonSerializer.Serialize(existingInfo, JsonOptions));
+                    }
+                    // Clear sessions when switching to a non-encrypted library
+                    if (!existingInfo.IsEncrypted)
+                        _sessions.Clear();
+
+                    // If the user provided a password for an existing unencrypted library, honor the
+                    // request: upgrade it to an encrypted library (set metadata + open a session).
+                    // Files themselves are encrypted on the next scan (ScanAsync encrypts any plaintext
+                    // file it finds in an encrypted library), so the app treats it as encrypted now.
+                    if (!existingInfo.IsEncrypted && !string.IsNullOrEmpty(password))
+                    {
+                        var (salt, verificationHash, encryptionKey) = _encryptionService.CreateKey(password);
+                        existingInfo.IsEncrypted = true;
+                        existingInfo.Salt = Convert.ToBase64String(salt);
+                        existingInfo.VerificationHash = Convert.ToBase64String(verificationHash);
+                        // Filename encryption is always enabled for encrypted libraries.
+                        existingInfo.EncryptFileNames = true;
+                        var upgradeToken = Guid.NewGuid().ToString("N");
+                        _sessions[upgradeToken] = new UnlockSession(encryptionKey, DateTime.UtcNow, existingInfo.Path);
+                        _allSessionKeys.Add(encryptionKey);
+                        await WriteTextFileSafelyAsync(infoPath, JsonSerializer.Serialize(existingInfo, JsonOptions));
+                        _logger.LogInformation(
+                            "InitializeAsync: upgraded existing library at {Path} to encrypted (password provided)",
+                            path);
+                    }
+
+                    // Register this library
+                    await RegisterLibraryAsync(existingInfo);
+                    return existingInfo;
                 }
-                // Clear sessions when switching to a non-encrypted library
-                if (!existingInfo.IsEncrypted)
-                    _sessions.Clear();
-
-                // Register this library
-                await RegisterLibraryAsync(existingInfo);
-                return existingInfo;
             }
+
+            // New library - create fresh
+            info = new LibraryInfo
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Version = 1,
+                Name = name ?? Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
+                Path = path,
+                CreatedAt = DateTime.UtcNow,
+                AssetCount = 0,
+                // Filename encryption is always on for encrypted libraries (i.e. when a password
+                // is provided); plaintext libraries have no names to encrypt.
+                EncryptFileNames = !string.IsNullOrEmpty(password)
+            };
+
+            // Handle optional encryption
+            if (!string.IsNullOrEmpty(password))
+            {
+                var (salt, verificationHash, encryptionKey) = _encryptionService.CreateKey(password);
+                info.IsEncrypted = true;
+                info.Salt = Convert.ToBase64String(salt);
+                info.VerificationHash = Convert.ToBase64String(verificationHash);
+                var token = Guid.NewGuid().ToString("N");
+                _sessions[token] = new UnlockSession(encryptionKey, DateTime.UtcNow, info.Path);
+                _allSessionKeys.Add(encryptionKey);
+            }
+
+            await WriteTextFileSafelyAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+
+            // Register this library
+            await RegisterLibraryAsync(info);
+            return info;
         }
-
-        // New library - create fresh
-        info = new LibraryInfo
+        finally
         {
-            Id = Guid.NewGuid().ToString("N"),
-            Version = 1,
-            Name = name ?? Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
-            Path = path,
-            CreatedAt = DateTime.UtcNow,
-            AssetCount = 0
-        };
-
-        // Handle optional encryption
-        if (!string.IsNullOrEmpty(password))
-        {
-            var (salt, verificationHash, encryptionKey) = _encryptionService.CreateKey(password);
-            info.IsEncrypted = true;
-            info.Salt = Convert.ToBase64String(salt);
-            info.VerificationHash = Convert.ToBase64String(verificationHash);
-            var token = Guid.NewGuid().ToString("N");
-            _sessions[token] = new UnlockSession(encryptionKey, DateTime.UtcNow);
-            _allSessionKeys.Add(encryptionKey);
+            _fileLock.Release();
         }
-
-        await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
-
-        // Register this library
-        await RegisterLibraryAsync(info);
-        return info;
     }
 
     public Task<LibraryInfo?> CheckPathAsync(string path)
@@ -111,7 +147,9 @@ public class LibraryService : ILibraryService
             if (!File.Exists(infoPath))
                 return Task.FromResult<LibraryInfo?>(null);
 
-            var json = File.ReadAllText(infoPath);
+            var json = ReadTextFileSafely(infoPath);
+            if (json is null)
+                return Task.FromResult<LibraryInfo?>(null);
             var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
 
             if (info is not null)
@@ -138,7 +176,7 @@ public class LibraryService : ILibraryService
             if (!File.Exists(infoPath))
                 return null;
 
-            var json = await RetryFileOperationAsync(() => File.ReadAllTextAsync(infoPath));
+            var json = await ReadTextFileSafelyAsync(infoPath);
             var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
 
             if (info is not null)
@@ -150,8 +188,7 @@ public class LibraryService : ILibraryService
                         && ImageExtensions.Contains(Path.GetExtension(f)));
 
                 // Persist the count back to library.json and the registry
-                await RetryFileOperationAsync(() =>
-                    File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions)));
+                await WriteTextFileSafelyAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
                 await RegisterLibraryAsync(info);
             }
 
@@ -173,19 +210,7 @@ public class LibraryService : ILibraryService
         var path = GetLibraryPath();
         if (path is null) return null;
 
-        var infoPath = Path.Combine(path, ".collect", "library.json");
-        if (!File.Exists(infoPath)) return null;
-
-        try
-        {
-            var json = File.ReadAllText(infoPath);
-            var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
-            return info?.Id;
-        }
-        catch
-        {
-            return null;
-        }
+        return ReadInfoFromPath(path)?.Id;
     }
 
     public async Task<string?> GetPathByIdAsync(string id)
@@ -200,9 +225,12 @@ public class LibraryService : ILibraryService
         var path = LibrariesRegistryPath;
         if (!File.Exists(path))
             return null;
+
+        _registryLock.Wait();
         try
         {
-            var json = File.ReadAllText(path);
+            var json = ReadTextFileSafely(path);
+            if (json is null) return null;
             var libraries = JsonSerializer.Deserialize<List<LibraryInfo>>(json, JsonOptions);
             if (libraries is null) return null;
             var entry = FindLibraryById(libraries, id);
@@ -211,6 +239,10 @@ public class LibraryService : ILibraryService
         catch
         {
             return null;
+        }
+        finally
+        {
+            _registryLock.Release();
         }
     }
 
@@ -436,9 +468,15 @@ public class LibraryService : ILibraryService
         if (!File.Exists(filePath))
             return new List<LibraryInfo>();
 
-        var json = await File.ReadAllTextAsync(filePath);
-        var libraries = JsonSerializer.Deserialize<List<LibraryInfo>>(json, JsonOptions);
-        return libraries ?? new List<LibraryInfo>();
+        await _registryLock.WaitAsync();
+        try
+        {
+            return await ReadRegistryListAsync(filePath);
+        }
+        finally
+        {
+            _registryLock.Release();
+        }
     }
 
     /// <summary>
@@ -463,33 +501,42 @@ public class LibraryService : ILibraryService
         if (!File.Exists(filePath))
             return false;
 
-        var json = await File.ReadAllTextAsync(filePath);
-        var libraries = JsonSerializer.Deserialize<List<LibraryInfo>>(json, JsonOptions);
-        if (libraries is null)
-            return false;
+        await _registryLock.WaitAsync();
+        try
+        {
+            var libraries = await ReadRegistryListAsync(filePath);
 
-        var match = FindLibraryById(libraries, id);
-        if (match is null)
-            return false;
+            var match = FindLibraryById(libraries, id);
+            if (match is null)
+                return false;
 
-        var removed = libraries.Remove(match);
-        if (removed)
-            await File.WriteAllTextAsync(filePath, JsonSerializer.Serialize(libraries, JsonOptions));
+            var removed = libraries.Remove(match);
+            if (removed)
+                await WriteTextFileSafelyAsync(filePath, JsonSerializer.Serialize(libraries, JsonOptions));
 
-        return removed;
+            return removed;
+        }
+        finally
+        {
+            _registryLock.Release();
+        }
     }
 
     /// <summary>
     /// Lightweight read of library.json from a given path — no file scanning, no registry writes.
     /// </summary>
-    private static LibraryInfo? ReadInfoFromPath(string path)
+    private LibraryInfo? ReadInfoFromPath(string path)
     {
+        if (string.IsNullOrEmpty(path)) return null;
         var infoPath = Path.Combine(path, ".collect", "library.json");
         if (!File.Exists(infoPath))
             return null;
+
+        _fileLock.Wait();
         try
         {
-            var json = File.ReadAllText(infoPath);
+            var json = ReadTextFileSafely(infoPath);
+            if (json is null) return null;
             var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
             if (info is not null)
                 info.Path = path;
@@ -498,6 +545,10 @@ public class LibraryService : ILibraryService
         catch
         {
             return null;
+        }
+        finally
+        {
+            _fileLock.Release();
         }
     }
 
@@ -515,7 +566,9 @@ public class LibraryService : ILibraryService
         // 3. Handle session state for encrypted libraries
         if (info.IsEncrypted)
         {
-            if (!IsLibraryUnlocked())
+            var hasSessionForLibrary = _sessions.Values.Any(s =>
+                string.Equals(s.LibraryPath, entry.Path, StringComparison.OrdinalIgnoreCase));
+            if (!hasSessionForLibrary)
                 _sessions.Clear();
         }
         else
@@ -552,14 +605,14 @@ public class LibraryService : ILibraryService
             return (null, null!);
 
         var token = Guid.NewGuid().ToString("N");
-        _sessions[token] = new UnlockSession(encryptionKey, DateTime.UtcNow);
+        _sessions[token] = new UnlockSession(encryptionKey, DateTime.UtcNow, info.Path);
         _allSessionKeys.Add(encryptionKey);
         return (info, token);
     }
 
     /// <summary>
     /// Check if the current library is unlocked and get remaining unlock time.
-    /// When token is provided, checks that specific session; otherwise checks any valid session.
+    /// When token is provided, checks that specific session; otherwise checks the current library's session.
     /// </summary>
     public Task<(bool Unlocked, int RemainingSeconds)> GetUnlockStatusAsync(string? token = null)
     {
@@ -577,15 +630,12 @@ public class LibraryService : ILibraryService
             return Task.FromResult((true, remaining));
         }
 
-        // Check any valid session (backward compatibility)
-        foreach (var kvp in _sessions)
-        {
-            var elapsed = DateTime.UtcNow - kvp.Value.UnlockedAt;
-            var remaining = (int)(600 - elapsed.TotalSeconds);
-            if (remaining > 0)
-                return Task.FromResult((true, remaining));
-        }
-        return Task.FromResult((false, 0));
+        // No token: resolve the current library's session
+        var sessionForCurrent = GetValidSession(null);
+        if (sessionForCurrent is null)
+            return Task.FromResult((false, 0));
+        var remainingSeconds = (int)(600 - (DateTime.UtcNow - sessionForCurrent.UnlockedAt).TotalSeconds);
+        return Task.FromResult((true, Math.Max(0, remainingSeconds)));
     }
 
     /// <summary>
@@ -599,53 +649,74 @@ public class LibraryService : ILibraryService
     }
 
     /// <summary>
+    /// Check if the current library encrypts on-disk file names by reading its metadata.
+    /// </summary>
+    public bool EncryptsFileNames()
+    {
+        var path = GetLibraryPath();
+        var info = ReadInfoFromPath(path ?? "");
+        return info?.EncryptFileNames ?? false;
+    }
+
+    /// <summary>
     /// Check if the encryption key is available (library is unlocked for this session).
-    /// When token is provided, checks that specific session; otherwise checks any valid session.
+    /// When token is provided, checks that specific session; otherwise checks the current library's session.
     /// Key persists for 10 minutes in memory after unlock.
     /// </summary>
     public bool IsLibraryUnlocked(string? token = null)
     {
-        if (token is not null)
-        {
-            if (!_sessions.TryGetValue(token, out var session)) return false;
-            if (DateTime.UtcNow - session.UnlockedAt > TimeSpan.FromMinutes(10))
-            {
-                _sessions.TryRemove(token, out _);
-                return false;
-            }
-            return true;
-        }
-
-        // Check any valid session (backward compatibility)
-        foreach (var kvp in _sessions)
-        {
-            if (DateTime.UtcNow - kvp.Value.UnlockedAt <= TimeSpan.FromMinutes(10))
-                return true;
-        }
-        return false;
+        return GetValidSession(token) is not null;
     }
 
     /// <summary>
     /// Get the current encryption key, or null if not available.
     /// When token is provided, returns the key for that specific session;
-    /// otherwise returns the first valid key (backward compatibility).
+    /// otherwise returns the current library's session key (never another library's key).
     /// </summary>
     public byte[]? GetEncryptionKey(string? token = null)
     {
+        return GetValidSession(token)?.EncryptionKey;
+    }
+
+    /// <summary>
+    /// Resolves a valid (non-expired) unlock session for the given token,
+    /// or for the current library when token is null.
+    /// When token is null, sessions from other libraries are never returned,
+    /// preventing cross-library key confusion.
+    /// </summary>
+    private UnlockSession? GetValidSession(string? token)
+    {
         if (token is not null)
         {
-            if (_sessions.TryGetValue(token, out var session))
-                return session.EncryptionKey;
-            return null;
+            if (!_sessions.TryGetValue(token, out var session))
+                return null;
+            if (DateTime.UtcNow - session.UnlockedAt > TimeSpan.FromMinutes(10))
+            {
+                _sessions.TryRemove(token, out _);
+                return null;
+            }
+            return session;
         }
 
-        // Return first valid key (backward compatibility)
+        // No token: match the session to the current library path
+        var currentPath = GetLibraryPath();
+        if (string.IsNullOrEmpty(currentPath))
+            return null;
+
+        UnlockSession? valid = null;
         foreach (var kvp in _sessions)
         {
-            if (DateTime.UtcNow - kvp.Value.UnlockedAt <= TimeSpan.FromMinutes(10))
-                return kvp.Value.EncryptionKey;
+            if (!string.Equals(kvp.Value.LibraryPath, currentPath, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (DateTime.UtcNow - kvp.Value.UnlockedAt > TimeSpan.FromMinutes(10))
+            {
+                _sessions.TryRemove(kvp.Key, out _);
+                continue;
+            }
+            valid = kvp.Value;
+            break;
         }
-        return null;
+        return valid;
     }
 
     /// <summary>
@@ -670,28 +741,36 @@ public class LibraryService : ILibraryService
         var dir = Path.GetDirectoryName(filePath)!;
         Directory.CreateDirectory(dir);
 
-        var libraries = await GetLibrariesAsync();
-        var existing = libraries.FirstOrDefault(l => l.Id == info.Id);
-        if (existing is not null)
+        await _registryLock.WaitAsync();
+        try
         {
-            // Update existing entry
-            existing.Name = info.Name;
-            existing.Path = info.Path;
-            existing.AssetCount = info.AssetCount;
-            existing.IsEncrypted = info.IsEncrypted;
-            if (!info.IsEncrypted)
+            var libraries = await ReadRegistryListAsync(filePath);
+            var existing = libraries.FirstOrDefault(l => l.Id == info.Id);
+            if (existing is not null)
             {
-                existing.Salt = null;
-                existing.VerificationHash = null;
+                // Update existing entry
+                existing.Name = info.Name;
+                existing.Path = info.Path;
+                existing.AssetCount = info.AssetCount;
+                existing.IsEncrypted = info.IsEncrypted;
+                existing.EncryptFileNames = info.EncryptFileNames;
+                if (!info.IsEncrypted)
+                {
+                    existing.Salt = null;
+                    existing.VerificationHash = null;
+                }
             }
-        }
-        else
-        {
-            libraries.Add(info);
-        }
+            else
+            {
+                libraries.Add(info);
+            }
 
-        await RetryFileOperationAsync(() =>
-            File.WriteAllTextAsync(filePath, JsonSerializer.Serialize(libraries, JsonOptions)));
+            await WriteTextFileSafelyAsync(filePath, JsonSerializer.Serialize(libraries, JsonOptions));
+        }
+        finally
+        {
+            _registryLock.Release();
+        }
     }
 
     /// <summary>
@@ -742,6 +821,64 @@ public class LibraryService : ILibraryService
         await operation();
     }
 
+    /// <summary>
+    /// Reads a UTF-8 text file with FileShare.ReadWrite so concurrent readers/writers
+    /// (e.g. during rapid waterfall refreshes) don't trigger sharing violations on Windows.
+    /// Retries transient IOExceptions.
+    /// </summary>
+    private static async Task<string> ReadTextFileSafelyAsync(string path)
+    {
+        return await RetryFileOperationAsync(async () =>
+        {
+            await using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs);
+            return await reader.ReadToEndAsync();
+        });
+    }
+
+    /// <summary>
+    /// Writes a UTF-8 text file atomically (temp + rename, see <see cref="SafeFileIO.WriteAllTextAtomic"/>),
+    /// retaining the transient-I/O retry semantics so metadata files (.collect/library.json, the
+    /// registry) are never truncated on failure.
+    /// </summary>
+    private async Task WriteTextFileSafelyAsync(string path, string content)
+    {
+        await RetryFileOperationAsync(() =>
+        {
+            SafeFileIO.WriteAllTextAtomic(path, content, _logger);
+            return Task.CompletedTask;
+        });
+    }
+
+    /// <summary>
+    /// Synchronous read of a UTF-8 text file with FileShare.ReadWrite.
+    /// Returns null on transient IO errors instead of throwing.
+    /// </summary>
+    private static string? ReadTextFileSafely(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs);
+            return reader.ReadToEnd();
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads and deserializes the registry file (lock-free — callers must hold <see cref="_registryLock"/>).
+    /// </summary>
+    private static async Task<List<LibraryInfo>> ReadRegistryListAsync(string filePath)
+    {
+        if (!File.Exists(filePath))
+            return new List<LibraryInfo>();
+        var json = await ReadTextFileSafelyAsync(filePath);
+        return JsonSerializer.Deserialize<List<LibraryInfo>>(json, JsonOptions) ?? new List<LibraryInfo>();
+    }
+
     public async Task UpdateAssetCountAsync(int count)
     {
         await _fileLock.WaitAsync();
@@ -753,12 +890,12 @@ public class LibraryService : ILibraryService
             if (!File.Exists(infoPath))
                 return;
 
-            var json = await File.ReadAllTextAsync(infoPath);
+            var json = await ReadTextFileSafelyAsync(infoPath);
             var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
             if (info is null) return;
 
             info.AssetCount = count;
-            await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+            await WriteTextFileSafelyAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
 
             // Also update the registry entry
             await RegisterLibraryAsync(info);
@@ -780,7 +917,7 @@ public class LibraryService : ILibraryService
             if (!File.Exists(infoPath))
                 return null;
 
-            var json = await File.ReadAllTextAsync(infoPath);
+            var json = await ReadTextFileSafelyAsync(infoPath);
             var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
             return info?.CategoryOrder;
         }
@@ -802,13 +939,13 @@ public class LibraryService : ILibraryService
             if (!File.Exists(infoPath))
                 throw new InvalidOperationException("Library metadata file not found.");
 
-            var json = await File.ReadAllTextAsync(infoPath);
+            var json = await ReadTextFileSafelyAsync(infoPath);
             var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
             if (info is null)
                 throw new InvalidOperationException("Failed to read library metadata.");
 
             info.CategoryOrder = order;
-            await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+            await WriteTextFileSafelyAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
         }
         finally
         {
@@ -824,13 +961,13 @@ public class LibraryService : ILibraryService
             var infoPath = GetInfoPath();
             if (infoPath is null || !File.Exists(infoPath)) return;
 
-            var json = await File.ReadAllTextAsync(infoPath);
+            var json = await ReadTextFileSafelyAsync(infoPath);
             var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
             if (info is null) return;
 
             updateAction(info);
 
-            await File.WriteAllTextAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+            await WriteTextFileSafelyAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
         }
         finally
         {

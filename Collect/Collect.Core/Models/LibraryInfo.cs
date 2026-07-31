@@ -24,6 +24,13 @@ public class LibraryInfo
     public bool IsEncrypted { get; set; }
 
     /// <summary>
+    /// Whether this library additionally encrypts on-disk file names (the basename, keeping the
+    /// extension) using a deterministic, reversible, authenticated scheme. Folders stay
+    /// plaintext. When true and the library is locked, real names/tags are withheld (strict mode).
+    /// </summary>
+    public bool EncryptFileNames { get; set; }
+
+    /// <summary>
     /// Base64-encoded PBKDF2 salt used for key derivation.
     /// Only present when <see cref="IsEncrypted"/> is true.
     /// </summary>

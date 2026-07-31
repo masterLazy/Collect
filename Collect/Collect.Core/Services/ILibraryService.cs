@@ -12,6 +12,8 @@ public interface ILibraryService
     /// If a library already exists at that path, loads the existing settings instead.
     /// When <paramref name="password"/> is provided, the library is encrypted at rest
     /// using AES-256-GCM (files are encrypted with the derived key).
+    /// When <paramref name="encryptFileNames"/> is true (only meaningful with a password),
+    /// the library is created with on-disk file-name encryption enabled.
     /// </summary>
     Task<LibraryInfo> InitializeAsync(string path, string? name = null, string? password = null);
 
@@ -136,6 +138,11 @@ public interface ILibraryService
     /// Check if the current library is encrypted.
     /// </summary>
     bool IsEncryptedLibrary();
+
+    /// <summary>
+    /// Check if the current library encrypts on-disk file names.
+    /// </summary>
+    bool EncryptsFileNames();
 
     /// <summary>
     /// Check if the current library is unlocked (encryption key is available in memory).

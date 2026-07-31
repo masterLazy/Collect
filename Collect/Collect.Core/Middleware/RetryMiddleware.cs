@@ -45,6 +45,19 @@ public class RetryMiddleware
             }
             catch (Exception ex) when (IsTransient(ex))
             {
+                // Never retry once the response has started — headers (and possibly part of the
+                // body) have already been sent, and re-running the pipeline would corrupt the
+                // in-flight response (e.g. a 200 with a Content-Length but an empty/truncated body).
+                // Likewise, a canceled request cannot succeed on retry.
+                if (context.Response.HasStarted || context.RequestAborted.IsCancellationRequested)
+                {
+                    _logger.LogWarning(ex,
+                        "RetryMiddleware: NOT retrying {Method} {Path} — response already started or request aborted (HasStarted={HasStarted}, Aborted={Aborted})",
+                        context.Request.Method, context.Request.Path,
+                        context.Response.HasStarted, context.RequestAborted.IsCancellationRequested);
+                    throw;
+                }
+
                 if (attempt >= RetryDelaysMs.Length)
                 {
                     _logger.LogError(ex,

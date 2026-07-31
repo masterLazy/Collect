@@ -2,6 +2,8 @@ using Collect.Core.Dtos;
 using Collect.Core.Models;
 using Collect.Core.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
+using System.Security.Cryptography;
 
 namespace Collect.Core.Controllers;
 
@@ -12,15 +14,18 @@ public class AssetsController : ControllerBase
     private readonly IAssetService _assetService;
     private readonly ILibraryService _libraryService;
     private readonly IEncryptionService _encryptionService;
+    private readonly ILogger<AssetsController> _logger;
 
     public AssetsController(
         IAssetService assetService,
         ILibraryService libraryService,
-        IEncryptionService encryptionService)
+        IEncryptionService encryptionService,
+        ILogger<AssetsController> logger)
     {
         _assetService = assetService;
         _libraryService = libraryService;
         _encryptionService = encryptionService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -59,6 +64,10 @@ public class AssetsController : ControllerBase
         [FromQuery] string sort = "newest",
         [FromQuery] bool subfolders = true)
     {
+        // Strict mode: a name-encrypted library that is locked must not reveal real names/tags.
+        if (_libraryService.IsEncryptedLibrary() && _libraryService.EncryptsFileNames() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         page = Math.Max(1, page);
         size = Math.Clamp(size, 1, 100);
 
@@ -73,6 +82,10 @@ public class AssetsController : ControllerBase
     [HttpGet("{id}")]
     public async Task<IActionResult> GetAsset(string id)
     {
+        // Strict mode: a name-encrypted library that is locked must not reveal real names/tags.
+        if (_libraryService.IsEncryptedLibrary() && _libraryService.EncryptsFileNames() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var detail = await _assetService.GetAssetDetailAsync(id);
         if (detail is null)
             return NotFound(new { error = $"Asset '{id}' not found." });
@@ -96,21 +109,52 @@ public class AssetsController : ControllerBase
 
         var thumbPath = await _assetService.GetThumbnailPathAsync(id);
         if (thumbPath is null || !System.IO.File.Exists(thumbPath))
+        {
+            _logger.LogWarning("Thumbnail not available for asset {Id} (path: {Path})", id, thumbPath);
             return NotFound(new { error = "Thumbnail not available." });
+        }
 
         // Prevent browser caching — ensures locked library thumbnails aren't served from cache
         Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
 
-        if (_libraryService.IsEncryptedLibrary())
+        var encryptionKey = _libraryService.GetEncryptionKey(GetUnlockToken());
+        if (encryptionKey is not null)
         {
-            var encryptionKey = _libraryService.GetEncryptionKey(GetUnlockToken());
-            if (encryptionKey is null)
-                return StatusCode(403, new { error = "Library is locked. Please unlock first." });
-
-            var decrypted = _encryptionService.ReadAndDecryptFile(thumbPath, encryptionKey);
-            return File(decrypted, "image/webp");
+            try
+            {
+                var decrypted = _encryptionService.ReadAndDecryptFile(thumbPath, encryptionKey);
+                _logger.LogInformation("Thumbnail: serving asset {Id}, decrypted {Len} bytes", id, decrypted.Length);
+                return File(decrypted, "image/webp");
+            }
+            catch (AuthenticationTagMismatchException)
+            {
+                // Thumbnail is plaintext (e.g. generated before the library was encrypted). Re-encrypt it
+                // in place so it matches the library's encryption state, then serve the plaintext bytes
+                // (future requests decrypt normally — this self-heals the inconsistency on first access).
+                _logger.LogWarning("Thumbnail: decrypt mismatch for asset {Id} at {Path} — re-encrypting and serving", id, thumbPath);
+                try
+                {
+                    var plaintextThumb = System.IO.File.ReadAllBytes(thumbPath);
+                    var encryptedThumb = _encryptionService.Encrypt(plaintextThumb, encryptionKey);
+                    SafeFileIO.WriteAllBytesAtomic(thumbPath, encryptedThumb, _logger);
+                    return File(plaintextThumb, "image/webp");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Thumbnail: failed to re-encrypt plaintext thumbnail at {Path} — serving as-is", thumbPath);
+                    return PhysicalFile(thumbPath, "image/webp");
+                }
+            }
         }
 
+        // No key available — an encrypted library must be locked at this point.
+        if (_libraryService.IsEncryptedLibrary())
+        {
+            _logger.LogWarning("Thumbnail: locked (no key) for asset {Id}", id);
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+        }
+
+        _logger.LogInformation("Thumbnail: serving plaintext file for asset {Id}", id);
         return PhysicalFile(thumbPath, "image/webp");
     }
 
@@ -125,26 +169,46 @@ public class AssetsController : ControllerBase
     {
         var asset = await _assetService.GetAssetAsync(id);
         if (asset is null)
+        {
+            _logger.LogWarning("Image: asset {Id} not found", id);
             return NotFound(new { error = $"Asset '{id}' not found." });
+        }
 
         var filePath = _assetService.GetAssetFilePath(id);
         if (filePath is null || !System.IO.File.Exists(filePath))
-            return NotFound(new { error = "Image file not found on disk." });
-
-        // Check encryption status
-        if (_libraryService.IsEncryptedLibrary())
         {
-            if (!_libraryService.IsLibraryUnlocked(GetUnlockToken()))
-                return StatusCode(403, new { error = "Library is locked. Please unlock first." });
-
-            var encryptionKey = _libraryService.GetEncryptionKey(GetUnlockToken())
-                ?? throw new InvalidOperationException("Library is locked.");
-            var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
-            Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
-            return File(decrypted, asset.MimeType);
+            _logger.LogWarning("Image: file missing for asset {Id} (path: {Path})", id, filePath);
+            return NotFound(new { error = "Image file not found on disk." });
         }
 
         Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+
+        // Decrypt first if a key is available (encrypted library, unlocked).
+        var encryptionKey = _libraryService.GetEncryptionKey(GetUnlockToken());
+        _logger.LogInformation("Image: asset {Id} — library encrypted={Encrypted}, key present={Key}", id, _libraryService.IsEncryptedLibrary(), encryptionKey is not null);
+        if (encryptionKey is not null)
+        {
+            try
+            {
+                var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
+                var detected = ImageMimeDetector.Detect(decrypted);
+                _logger.LogInformation("Image: serving asset {Id}, decrypted {Len} bytes, magic={Magic}, mime={Mime} (ext mime={ExtMime})",
+                    id, decrypted.Length, ImageMimeDetector.MagicHex(decrypted), detected ?? "unknown", asset.MimeType);
+                return File(decrypted, detected ?? asset.MimeType);
+            }
+            catch (AuthenticationTagMismatchException)
+            {
+                _logger.LogWarning("Image: decrypt mismatch for asset {Id} at {Path} — treating as plaintext", id, filePath);
+                // File is plaintext (not actually encrypted) — serve as-is.
+                // Also guards against a transient IsEncryptedLibrary() misread that would
+                // otherwise serve raw ciphertext as an image (200 with undecodable bytes).
+            }
+        }
+
+        // No key available — must be locked (encrypted) or a plain library.
+        if (_libraryService.IsEncryptedLibrary())
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         return PhysicalFile(filePath, asset.MimeType);
     }
 
@@ -177,6 +241,10 @@ public class AssetsController : ControllerBase
         [FromQuery] int size = 30,
         [FromQuery] string? folder = null)
     {
+        // Strict mode: a name-encrypted library that is locked must not reveal real names/tags.
+        if (_libraryService.IsEncryptedLibrary() && _libraryService.EncryptsFileNames() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         page = Math.Max(1, page);
         size = Math.Clamp(size, 1, 100);
 

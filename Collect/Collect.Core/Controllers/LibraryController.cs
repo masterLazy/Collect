@@ -68,6 +68,7 @@ public class LibraryController : ControllerBase
                 AssetCount = 0,
                 info.CategoryOrder,
                 info.IsEncrypted,
+                EncryptFileNames = info.EncryptFileNames,
                 Locked = true
             });
         }
@@ -182,7 +183,8 @@ public class LibraryController : ControllerBase
             info.CreatedAt,
             info.AssetCount,
             info.CategoryOrder,
-            info.IsEncrypted
+            info.IsEncrypted,
+            info.EncryptFileNames
         };
     }
 

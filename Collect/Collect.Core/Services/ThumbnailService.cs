@@ -1,4 +1,5 @@
 using SkiaSharp;
+using Microsoft.Extensions.Logging;
 
 namespace Collect.Core.Services;
 
@@ -9,16 +10,19 @@ public class ThumbnailService : IThumbnailService
     private static readonly object _lock = new();
 
     private readonly IEncryptionService _encryptionService;
+    private readonly ILogger<ThumbnailService> _logger;
 
-    public ThumbnailService(IEncryptionService encryptionService)
+    public ThumbnailService(IEncryptionService encryptionService, ILogger<ThumbnailService> logger)
     {
         _encryptionService = encryptionService;
+        _logger = logger;
     }
 
     public bool TryGenerateThumbnail(string sourceFilePath, string outputPath, int maxWidth = 400, byte[]? encryptionKey = null, Action<SKBitmap>? onNewThumbnail = null)
     {
         SKBitmap? resized = null;
         bool generated;
+        string? magic = null;
 
         // Decode and generate the thumbnail under the lock (disk I/O + Skia)
         lock (_lock)
@@ -32,15 +36,30 @@ public class ThumbnailService : IThumbnailService
                 if (encryptionKey is not null)
                 {
                     var decrypted = _encryptionService.ReadAndDecryptFile(sourceFilePath, encryptionKey);
+                    magic = ImageMimeDetector.MagicHex(decrypted);
                     using var original = SKBitmap.Decode(decrypted);
-                    if (original == null) return false;
+                    if (original == null)
+                    {
+                        _logger.LogWarning("Thumbnail decode returned null for encrypted source {Path} ({Len} bytes, magic={Magic})", sourceFilePath, decrypted.Length, magic);
+                        return false;
+                    }
                     (generated, resized) = GenerateAndSaveThumbnail(original, outputPath, maxWidth);
                 }
                 else
                 {
                     using var input = File.OpenRead(sourceFilePath);
+                    var head = new byte[12];
+                    var read = input.Read(head, 0, head.Length);
+                    magic = Convert.ToHexString(head.AsSpan(0, read));
+                    // IMPORTANT: reading the magic head advanced the stream position — rewind to
+                    // the start so SKBitmap.Decode sees the full file (PNG signature intact).
+                    input.Position = 0;
                     using var original = SKBitmap.Decode(input);
-                    if (original == null) return false;
+                    if (original == null)
+                    {
+                        _logger.LogWarning("Thumbnail decode returned null for plaintext source {Path} (magic={Magic})", sourceFilePath, magic);
+                        return false;
+                    }
                     (generated, resized) = GenerateAndSaveThumbnail(original, outputPath, maxWidth);
                 }
 
@@ -48,11 +67,12 @@ public class ThumbnailService : IThumbnailService
                 {
                     var plaintext = File.ReadAllBytes(outputPath);
                     var encrypted = _encryptionService.Encrypt(plaintext, encryptionKey);
-                    File.WriteAllBytes(outputPath, encrypted);
+                    SafeFileIO.WriteAllBytesAtomic(outputPath, encrypted, _logger);
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogWarning(ex, "Thumbnail generation failed for {Path} (magic={Magic})", sourceFilePath, magic);
                 resized?.Dispose();
                 return false;
             }

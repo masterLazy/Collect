@@ -32,4 +32,20 @@ public interface IEncryptionService
     /// Reads a file, decrypts it, returns the plaintext bytes.
     /// </summary>
     byte[] ReadAndDecryptFile(string filePath, byte[] key);
+
+    /// <summary>
+    /// Deterministically encrypts a plaintext name (basename WITHOUT extension) into a
+    /// filesystem-safe, reversible, authenticated string. The same plaintext + key always
+    /// yields the same output, so scan/reconcile/rename operations stay stable. The result
+    /// contains only the base64url character set [A-Za-z0-9_-] and is safe as a filename.
+    /// </summary>
+    string EncryptFileName(string plainName, byte[] key);
+
+    /// <summary>
+    /// Reverses <see cref="EncryptFileName"/>. Returns true with the plaintext name on success;
+    /// false (with <paramref name="plainName"/> = null) when the value is not a valid encrypted
+    /// name for <paramref name="key"/> — e.g. a legacy plaintext on-disk name, a value from a
+    /// different key, or corrupted data. Callers must treat "false" as "name is plaintext legacy".
+    /// </summary>
+    bool TryDecryptFileName(string encrypted, byte[] key, out string? plainName);
 }
