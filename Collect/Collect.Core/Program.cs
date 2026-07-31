@@ -33,6 +33,7 @@ var app = builder.Build();
 // ── Middleware Pipeline ───────────────────────────────
 app.UseMiddleware<ErrorHandlingMiddleware>();
 app.UseMiddleware<LibraryContextMiddleware>();
+app.UseMiddleware<RetryMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {

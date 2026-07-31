@@ -107,54 +107,39 @@ export function LibraryPage() {
             : `${libraryName}/${currentFolder}`
     useDocumentTitle(folderPart ? `${folderPart} · Collect` : "Library Manager · Collect")
 
-    // Load library by ID on mount with retry
+    // Load library by ID on mount (retry handled by backend RetryMiddleware)
     useEffect(() => {
         if (!libraryId) return
 
         let cancelled = false
-        const maxRetries = 2
 
-        const loadWithRetry = async () => {
-            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        setLibraryLoading(true)
+        setLibraryError(false)
+
+        api.loadLibrary(libraryId)
+            .then((info) => {
                 if (cancelled) return
-                try {
-                    if (attempt === 0) {
-                        setLibraryLoading(true)
-                        setLibraryError(false)
-                    }
-                    const info = await api.loadLibrary(libraryId)
-                    if (cancelled) return
-                    setLibraryName(info.name)
-                    setLibraryFullId(info.id)
-                    setLibraryPath(info.path)
-                    if (info.isEncrypted) {
-                        setLibraryEncrypted(true)
-                        // Check if already unlocked (10-min persistence)
-                        try {
-                            const status = await api.getUnlockStatus(libraryId!)
-                            if (!status.unlocked) {
-                                setShowUnlockDialog(true)
-                            }
-                        } catch {
-                            setShowUnlockDialog(true)
-                        }
-                    }
-                    setLibraryLoading(false)
-                    return
-                } catch {
-                    if (cancelled) return
-                    if (attempt < maxRetries) {
-                        // Wait before retrying
-                        await new Promise(r => setTimeout(r, 300 * (attempt + 1)))
-                    } else {
-                        setLibraryError(true)
-                        setLibraryLoading(false)
-                    }
+                setLibraryName(info.name)
+                setLibraryFullId(info.id)
+                setLibraryPath(info.path)
+                if (info.isEncrypted) {
+                    setLibraryEncrypted(true)
+                    // Check if already unlocked (10-min persistence)
+                    api.getUnlockStatus(libraryId!)
+                        .then((status) => {
+                            if (!status.unlocked) setShowUnlockDialog(true)
+                        })
+                        .catch(() => setShowUnlockDialog(true))
                 }
-            }
-        }
+            })
+            .catch(() => {
+                if (cancelled) return
+                setLibraryError(true)
+            })
+            .finally(() => {
+                if (!cancelled) setLibraryLoading(false)
+            })
 
-        loadWithRetry()
         return () => { cancelled = true }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [libraryId])
