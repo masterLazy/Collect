@@ -133,6 +133,10 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [moving, setMoving] = useState(false)
     const [deleted, setDeleted] = useState(false)
 
+    // Guards against stale responses when the user quickly switches assets:
+    // only the fetch for the current asset may update state.
+    const fetchGenRef = useRef(0)
+
     useEffect(() => {
         if (!assetId) {
             setAsset(null)
@@ -145,13 +149,28 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         setImageLoaded(false)
         setImageExpanded(false)
         setImageOverflows(false)
+
+        const gen = ++fetchGenRef.current
+
         api.getAsset(assetId, libraryId!)
             .then((data) => {
+                if (fetchGenRef.current !== gen) return
                 setAsset(data)
                 setTags(data.tags)
             })
-            .catch(() => setError(true))
-            .finally(() => setLoading(false))
+            .catch(() => {
+                if (fetchGenRef.current === gen) setError(true)
+            })
+            .finally(() => {
+                if (fetchGenRef.current !== gen) return
+                setLoading(false)
+            })
+
+        return () => {
+            // Invalidate any in-flight fetch when the asset changes or the sidebar unmounts,
+            // so a slow response can never update state for a stale asset.
+            fetchGenRef.current++
+        }
     }, [assetId, libraryId])
 
     const handleTagsChange = (newTags: AssetTag[]) => {
