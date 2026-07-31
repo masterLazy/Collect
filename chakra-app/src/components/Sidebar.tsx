@@ -16,7 +16,7 @@ import {
     Text,
 } from "@chakra-ui/react"
 import { api, API_BASE } from "../services/api"
-import { copyToClipboard } from "../services/clipboard"
+import { CopyButton } from "./CopyButton"
 import { PaletteBar } from "./PaletteBar"
 import { TagEditor } from "./TagEditor"
 import { DirectoryTreePicker } from "./DirectoryPicker"
@@ -127,7 +127,6 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [imageLoaded, setImageLoaded] = useState(false)
     const [error, setError] = useState(false)
     const [tags, setTags] = useState<AssetTag[]>([])
-    const [copiedPath, setCopiedPath] = useState(false)
     const [moveDialogOpen, setMoveDialogOpen] = useState(false)
     const [selectedMoveTarget, setSelectedMoveTarget] = useState<string>("")
     const [moveTargetSelected, setMoveTargetSelected] = useState(false)
@@ -144,7 +143,6 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         setLoading(true)
         setError(false)
         setImageLoaded(false)
-        setCopiedPath(false)
         setImageExpanded(false)
         setImageOverflows(false)
         api.getAsset(assetId, libraryId!)
@@ -163,15 +161,6 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const handleTagsSaved = (updated: AssetDetailDto) => {
         setAsset(updated)
         setTags(updated.tags)
-    }
-
-    const handleCopyPath = async () => {
-        if (!asset) return
-        const ok = await copyToClipboard(asset.relativePath, toaster)
-        if (ok) {
-            setCopiedPath(true)
-            setTimeout(() => setCopiedPath(false), 2000)
-        }
     }
 
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
@@ -508,14 +497,7 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
                             <Text fontSize="xs" color="fg" flex="1" wordBreak="break-all" lineClamp={2}>
                                 {asset.relativePath}
                             </Text>
-                            <Box
-                                color={copiedPath ? "green.500" : "fg.muted"}
-                                flexShrink="0"
-                                cursor="pointer"
-                                onClick={handleCopyPath}
-                            >
-                                <CopyIcon />
-                            </Box>
+                            <CopyButton text={asset.relativePath} />
                         </HStack>
                     </Box>
 

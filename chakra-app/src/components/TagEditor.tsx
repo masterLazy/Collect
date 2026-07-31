@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react"
 import { Box, Button, Field, HStack, Input, Stack, Text } from "@chakra-ui/react"
 import { TagBadge } from "./TagBadge"
 import { api } from "../services/api"
-import { copyToClipboard } from "../services/clipboard"
+import { CopyButton } from "./CopyButton"
 import type { AssetDetailDto, AssetTag } from "../types"
 import type { CustomToaster } from "./CustomToast"
 
@@ -55,15 +55,6 @@ function EditIcon() {
     return (
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-        </svg>
-    )
-}
-
-function CopyIcon() {
-    return (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
         </svg>
     )
 }
@@ -272,12 +263,8 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
         setDeleteMode(false)
     }
 
-    const handleCopyTags = async () => {
-        const tagString = tags
-            .map(t => t.type ? `[${t.type}]${t.value}` : t.value)
-            .join("-")
-        await copyToClipboard(tagString, toaster)
-    }
+    const getTagString = () =>
+        tags.map(t => t.type ? `[${t.type}]${t.value}` : t.value).join("-")
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (!showSuggestions || suggestions.length === 0) {
@@ -340,23 +327,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                     >*</Text>
                     {/* Copy — always visible when there are tags */}
                     {tags.length > 0 && (
-                        <Box
-                            as="button"
-                            onClick={handleCopyTags}
-                            display="inline-flex"
-                            alignItems="center"
-                            justifyContent="center"
-                            width="6"
-                            height="6"
-                            borderRadius="md"
-                            color="fg.subtle"
-                            opacity={0.5}
-                            _hover={{ opacity: 1, bg: "bg.subtle", cursor: "pointer" }}
-                            transition="opacity 0.1s ease"
-                            aria-label="Copy tags"
-                        >
-                            <CopyIcon />
-                        </Box>
+                        <CopyButton text={getTagString()} />
                     )}
                     {/* Pen — shown when not in edit mode */}
                     {!deleteMode && !hasChanges && tags.length > 0 && (
