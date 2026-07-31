@@ -154,7 +154,6 @@ public class AssetsController : ControllerBase
             return StatusCode(403, new { error = "Library is locked. Please unlock first." });
         }
 
-        _logger.LogInformation("Thumbnail: serving plaintext file for asset {Id}", id);
         return PhysicalFile(thumbPath, "image/webp");
     }
 
@@ -185,15 +184,12 @@ public class AssetsController : ControllerBase
 
         // Decrypt first if a key is available (encrypted library, unlocked).
         var encryptionKey = _libraryService.GetEncryptionKey(GetUnlockToken());
-        _logger.LogInformation("Image: asset {Id} — library encrypted={Encrypted}, key present={Key}", id, _libraryService.IsEncryptedLibrary(), encryptionKey is not null);
         if (encryptionKey is not null)
         {
             try
             {
                 var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
                 var detected = ImageMimeDetector.Detect(decrypted);
-                _logger.LogInformation("Image: serving asset {Id}, decrypted {Len} bytes, magic={Magic}, mime={Mime} (ext mime={ExtMime})",
-                    id, decrypted.Length, ImageMimeDetector.MagicHex(decrypted), detected ?? "unknown", asset.MimeType);
                 return File(decrypted, detected ?? asset.MimeType);
             }
             catch (AuthenticationTagMismatchException)
