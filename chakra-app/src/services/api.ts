@@ -29,6 +29,20 @@ function buildHeaders(extra?: Record<string, string>): Record<string, string> {
     return headers;
 }
 
+/**
+ * Error thrown by the API helpers when a request returns a non-OK status.
+ * Carries the HTTP status so callers can branch on it (e.g. a 403 from a
+ * locked name-encrypted library should trigger the unlock dialog).
+ */
+export class ApiError extends Error {
+    status: number;
+    constructor(message: string, status: number) {
+        super(message);
+        this.name = "ApiError";
+        this.status = status;
+    }
+}
+
 async function get<T>(url: string): Promise<T> {
     const response = await fetch(`${API_BASE}${url}`, {
         headers: buildHeaders(),
@@ -43,7 +57,7 @@ async function get<T>(url: string): Promise<T> {
                 errorMsg = `${response.status} - ${errorBody.detail}`;
             }
         } catch { /* ignore parsing errors */ }
-        throw new Error(errorMsg);
+        throw new ApiError(errorMsg, response.status);
     }
     return response.json();
 }
@@ -64,7 +78,7 @@ async function post<T>(url: string, body?: unknown): Promise<T> {
                 errorMsg = `${response.status} - ${errorBody.detail}`;
             }
         } catch { /* ignore parsing errors */ }
-        throw new Error(errorMsg);
+        throw new ApiError(errorMsg, response.status);
     }
     return response.json();
 }
@@ -85,7 +99,7 @@ async function put<T>(url: string, body: unknown): Promise<T> {
                 errorMsg = `${response.status} - ${errorBody.detail}`;
             }
         } catch { /* ignore parsing errors */ }
-        throw new Error(errorMsg);
+        throw new ApiError(errorMsg, response.status);
     }
     return response.json();
 }
@@ -108,7 +122,11 @@ function normalizeDirectoryNode(node: DirectoryNode): DirectoryNode {
 
 export const api = {
     initLibrary: (path: string, name: string, password?: string) =>
-        post<LibraryInfo>("/api/library/init", { path, name, ...(password ? { password } : {}) }),
+        post<LibraryInfo>("/api/library/init", {
+            path,
+            name,
+            ...(password ? { password } : {}),
+        }),
     getLibraryInfo: (libraryId: string) => get<LibraryInfo>(`/api/library/info?libraryId=${encodeURIComponent(libraryId)}`),
     scanAssets: (libraryId: string) => post<ScanResult>(`/api/assets/scan?libraryId=${encodeURIComponent(libraryId)}`),
     resolveTagConflicts: (libraryId: string, resolutions: { tagValue: string; chosenType: string }[]) =>

@@ -408,6 +408,7 @@ export function LibraryManager({ onLibraryReady, toaster }: LibraryManagerProps)
                                                         <Field.ErrorText>Passwords do not match</Field.ErrorText>
                                                     )}
                                                 </Field.Root>
+
                                             </VStack>
                                         )}
                                         <Button

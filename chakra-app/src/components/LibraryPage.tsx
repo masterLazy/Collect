@@ -5,6 +5,7 @@ import {
     Box,
     Button,
     Center,
+    Checkbox,
     Dialog,
     Field,
     HStack,
@@ -23,7 +24,7 @@ import { DirectoryTree } from "./DirectoryTree"
 import { AddAssetDialog } from "./AddAssetDialog"
 import { TagConflictDialog } from "./TagConflictDialog"
 import { useCustomToaster, ToastContainer, CustomToaster } from "./CustomToast"
-import { api } from "../services/api"
+import { api, ApiError } from "../services/api"
 import type { AssetDto, TagConflict } from "../types"
 
 const PAGE_SIZE = 30
@@ -41,6 +42,15 @@ const getSubfolders = (folder: string): boolean | undefined =>
     folder === "__root__" ? false : undefined
 
 export type SortMode = "newest" | "name" | "random"
+
+// True when the API call failed with HTTP 403. In strict mode a *locked*
+// name-encrypted library (encryptFileNames) returns 403 for list/search/
+// detail/tag endpoints, so we should surface the unlock dialog instead of a
+// generic error toast and drop any stale plaintext data.
+const isForbiddenError = (err: unknown): boolean =>
+    err instanceof ApiError
+        ? err.status === 403
+        : (err as { status?: number } | null)?.status === 403
 
 export function LibraryPage() {
     const { libraryId, "*": splat } = useParams()
@@ -215,12 +225,27 @@ export function LibraryPage() {
             }
             setAssets((prev) => (append ? [...prev, ...result.items] : result.items))
             setTotal(result.total)
-        } catch {
-            toaster.create({
-                title: "Load failed",
-                description: "Cannot fetch assets. Check backend server.",
-                type: "error",
-            })
+        } catch (err) {
+            // Strict mode: a locked name-encrypted library returns 403 for
+            // asset list/search. Surface the unlock dialog instead of the
+            // generic toast, and drop any stale plaintext names/tags.
+            if (isForbiddenError(err)) {
+                setAssets([])
+                setSelectedAssetId(null)
+                setSelectedTags([])
+                setShowUnlockDialog(true)
+                toaster.create({
+                    title: "Library locked",
+                    description: "This library is locked. Please unlock to view its assets and tags.",
+                    type: "warning",
+                })
+            } else {
+                toaster.create({
+                    title: "Load failed",
+                    description: "Cannot fetch assets. Check backend server.",
+                    type: "error",
+                })
+            }
         } finally {
             setLoading(false)
         }
@@ -706,7 +731,8 @@ export function LibraryPage() {
                                         try {
                                             await api.unlockLibrary(libraryId!, libraryId!, unlockPassword)
                                             setShowUnlockDialog(false)
-                                            // Reload assets after unlock
+                                            // Refresh directory tree and assets after unlock
+                                            setTreeRefreshKey((k) => k + 1)
                                             const info = await api.getLibraryInfo(libraryId!)
                                             setLibraryName(info.name)
                                             setLibraryFullId(info.id)
