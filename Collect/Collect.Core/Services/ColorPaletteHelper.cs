@@ -9,6 +9,7 @@ namespace Collect.Core.Services;
 /// saturation-weighted K-means++ clustering in CIE L*a*b* color space.
 /// </summary>
 public static class ColorPaletteHelper {
+    private const int MAX_IMAGE_SIZE = 400;
     private const int KMEANS_K = 10;
     private const double MERGE_THRESHOLD = 2.5;
     private const int MAX_KMEANS_ITER = 80;
@@ -24,7 +25,8 @@ public static class ColorPaletteHelper {
     /// sized bitmap (e.g. a thumbnail).
     /// </summary>
     public static ColorPalette? ComputeFromBitmap(SKBitmap bitmap) {
-        var pixels = GetLabPixels(bitmap);
+        using var scaled = ResizeBitmap(bitmap, MAX_IMAGE_SIZE);
+        var pixels = GetLabPixels(scaled);
         if (pixels.Count == 0) return null;
 
         // Saturation-weighted (正确使用饱和度 S = C / L*)
@@ -335,4 +337,15 @@ public static class ColorPaletteHelper {
         var props = finalWeightSums.Select(w => w / totalWeight).ToList();
         return (centersList, props);
     }
+
+    public static SKBitmap ResizeBitmap(SKBitmap original, int maxSize) {
+    int w = original.Width, h = original.Height;
+    if (w <= maxSize && h <= maxSize)
+        return original.Copy();   // 修复：必须复制像素数据
+
+    float ratio = Math.Min((float)maxSize / w, (float)maxSize / h);
+    int newW = (int)(w * ratio), newH = (int)(h * ratio);
+    var resized = original.Resize(new SKImageInfo(newW, newH), SKSamplingOptions.Default);
+    return resized ?? original.Copy();
+}
 }
