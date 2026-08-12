@@ -1,4 +1,4 @@
-import { Box, Button, HStack, IconButton, Menu, Popover, Portal, Text } from "@chakra-ui/react"
+import { Box, Button, HStack, IconButton, Menu, Popover, Portal, Spinner, Text } from "@chakra-ui/react"
 import { useEffect, useRef, useState } from "react"
 import { SearchInput } from "./SearchInput"
 import { TagFilterModal } from "./TagFilterModal"
@@ -170,7 +170,7 @@ export function TopBar({
                 py="2.5"
                 gap="2"
             >
-                {/* Mobile: Show All button (home moved to More menu) */}
+                {/* Mobile: Show All button (resets folder to all assets) */}
                 <IconButton
                     variant="ghost"
                     size="sm"
@@ -186,7 +186,7 @@ export function TopBar({
                     </svg>
                 </IconButton>
 
-                {/* Desktop: Home button */}
+                {/* Home button (desktop) */}
                 <IconButton
                     variant="ghost"
                     size="sm"
@@ -363,19 +363,6 @@ export function TopBar({
 
                 {/* Action buttons */}
                 <HStack gap="1" marginLeft="auto" flexShrink="0">
-                    {/* Desktop: Rescan */}
-                    <IconButton
-                        variant="ghost"
-                        size="sm"
-                        aria-label="Rescan library"
-                        loading={scanning}
-                        onClick={onRescan}
-                        title="Rescan library for external changes"
-                        display={{ base: "none", md: "inline-flex" }}
-                    >
-                        <RefreshIcon />
-                    </IconButton>
-
                     {/* Desktop: Sort */}
                     <Menu.Root>
                         <Menu.Trigger asChild>
@@ -463,6 +450,11 @@ export function TopBar({
                                     </Menu.Item>
 
                                     {/* ── Actions ── */}
+                                    <Menu.Item value="rescan" onClick={onRescan} py="2.5" disabled={scanning}>
+                                        <RefreshIcon />
+                                        <Box as="span" ml="2" flex="1">Rescan Library</Box>
+                                        {scanning && <Spinner size="xs" />}
+                                    </Menu.Item>
                                     <Menu.Item value="sort" py="2.5" display={{ md: "none" }} closeOnSelect={false}>
                                         <SortIcon />
                                         <Box as="span" ml="2" flex="1">Sort</Box>

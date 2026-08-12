@@ -459,6 +459,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                         onKeyDown={handleKeyDown}
                         size="sm"
                         bg="bg"
+                        color="fg"
                         border="1px solid"
                         borderColor="border"
                         flex="1"
@@ -485,6 +486,7 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                     position="absolute"
                     zIndex="dropdown"
                     bg="bg"
+                    color="fg"
                     border="1px solid"
                     borderColor="border"
                     borderRadius="md"

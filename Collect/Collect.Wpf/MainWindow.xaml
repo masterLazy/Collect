@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:Collect.Wpf"
         xmlns:lazy="clr-namespace:LazyWpf;assembly=LazyWpf"
         mc:Ignorable="d"
-        Title="Collect 1.0.0.beta.2"
+        Title="Collect 1.0.0.beta.3"
         Height="550" Width="850" WindowStartupLocation="CenterScreen" Closing="Window_Closing">
     <DockPanel Margin="12">
         <!-- Row 0: Toolbar -->
