@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 
 namespace Collect.Core.Services;
 
@@ -103,5 +104,99 @@ public class EncryptionService : IEncryptionService
     {
         var encryptedData = File.ReadAllBytes(filePath);
         return Decrypt(encryptedData, key);
+    }
+
+    private const int NameNonceSize = 12;
+    private const int NameTagSize = 16;
+
+    /// <summary>
+    /// Deterministically encrypts a plaintext name (the basename WITHOUT extension) into a
+    /// filesystem-safe, reversible, authenticated string.
+    /// </summary>
+    /// <remarks>
+    /// The scheme is deterministic: the nonce is derived via HMAC-SHA256 over the plaintext
+    /// (prefixed with a domain-separation string), so the same plaintext + key ALWAYS produces
+    /// the same output. This is required so scan/reconcile/rename operations do not thrash.
+    /// The GCM nonce is bound to the plaintext, so distinct plaintexts never reuse a (key, nonce)
+    /// pair, and the nonce is stored in the output itself (no chicken-and-egg lookup needed).
+    /// The associated data equals the nonce, preventing nonce tampering.
+    /// Output layout: [nonce(12)][ciphertext][tag(16)], then base64url-encoded
+    /// (only [A-Za-z0-9_-]) so it is safe as a filename component.
+    /// </remarks>
+    public string EncryptFileName(string plainName, byte[] key)
+    {
+        var data = Encoding.UTF8.GetBytes(plainName);
+        var nonce = HMACSHA256.HashData(key, Encoding.UTF8.GetBytes("collect.name.nonce:" + plainName))[..NameNonceSize];
+
+        var ciphertext = new byte[data.Length];
+        var tag = new byte[NameTagSize];
+        using var aes = new AesGcm(key, NameTagSize);
+        aes.Encrypt(nonce, data, ciphertext, tag, nonce);
+
+        var raw = new byte[NameNonceSize + ciphertext.Length + NameTagSize];
+        Buffer.BlockCopy(nonce, 0, raw, 0, NameNonceSize);
+        Buffer.BlockCopy(ciphertext, 0, raw, NameNonceSize, ciphertext.Length);
+        Buffer.BlockCopy(tag, 0, raw, NameNonceSize + ciphertext.Length, NameTagSize);
+
+        return Convert.ToBase64String(raw).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
+    /// <summary>
+    /// Reverses <see cref="EncryptFileName"/>.
+    /// </summary>
+    /// <remarks>
+    /// Returns <c>true</c> with the recovered plaintext name on success. Returns <c>false</c>
+    /// (with <paramref name="plainName"/> = <c>null</c>) when <paramref name="encrypted"/> is
+    /// not a valid encrypted name for <paramref name="key"/> — e.g. a legacy plaintext name on
+    /// disk, a value produced with a different key, or corrupted data. Callers must treat
+    /// <c>false</c> as "this name is not encrypted with this key (plaintext legacy)", never as
+    /// a hard error.
+    /// </remarks>
+    public bool TryDecryptFileName(string encrypted, byte[] key, out string? plainName)
+    {
+        plainName = null;
+
+        try
+        {
+            // Reverse base64url: '-'->'+', '_'->'/', then re-add padding.
+            var normalized = encrypted.Replace('-', '+').Replace('_', '/');
+            switch (normalized.Length % 4)
+            {
+                case 2: normalized += "=="; break;
+                case 3: normalized += "="; break;
+            }
+
+            var raw = Convert.FromBase64String(normalized);
+            if (raw.Length < NameNonceSize + NameTagSize)
+                return false;
+
+            var nonce = raw[..NameNonceSize];
+            var tag = raw[^NameTagSize..];
+            var ciphertext = raw[NameNonceSize..^NameTagSize];
+            var plaintext = new byte[ciphertext.Length];
+
+            using var aes = new AesGcm(key, NameTagSize);
+            aes.Decrypt(nonce, ciphertext, tag, plaintext, nonce);
+
+            plainName = Encoding.UTF8.GetString(plaintext);
+            return true;
+        }
+        catch (AuthenticationTagMismatchException)
+        {
+            // Not encrypted with this key — treat as plaintext legacy name.
+            plainName = null;
+            return false;
+        }
+        catch (FormatException)
+        {
+            // Not valid base64url — plaintext legacy name.
+            plainName = null;
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            plainName = null;
+            return false;
+        }
     }
 }

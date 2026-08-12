@@ -97,6 +97,8 @@ public interface IAssetService
 
     /// <summary>
     /// Encrypt all files in the current library with the given password.
+    /// When <paramref name="encryptFileNames"/> is true (default), on-disk file names are also
+    /// encrypted (deterministic, reversible) and the EncryptFileNames flag is set in library.json.
     /// Updates library.json with encryption metadata and encrypts all asset files in-place.
     /// Returns the number of files encrypted.
     /// </summary>

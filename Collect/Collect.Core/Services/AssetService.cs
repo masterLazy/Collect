@@ -27,6 +27,11 @@ public partial class AssetService : IAssetService
     private readonly ILogger<AssetService> _logger;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
 
+    // Serializes destructive encrypt/decrypt operations across separate backend instances
+    // (standalone server + WPF host) operating on the same library simultaneously.
+    private const string CrossProcessLockName = @"Global\Collect.BackendOperation";
+    private static readonly Mutex? _crossProcessMutex = TryCreateCrossProcessMutex();
+
     private List<Asset> _assets = new();
 
     public AssetService(
@@ -39,6 +44,92 @@ public partial class AssetService : IAssetService
         _thumbnailService = thumbnailService;
         _encryptionService = encryptionService;
         _logger = logger;
+    }
+
+    // ──────────────────────────────────────────────
+    //  Cross-process operation lock (V3)
+    // ──────────────────────────────────────────────
+
+    private static Mutex? TryCreateCrossProcessMutex()
+    {
+        try
+        {
+            return new Mutex(initiallyOwned: false, CrossProcessLockName);
+        }
+        catch (Exception)
+        {
+            // Global namespace unavailable (e.g. restricted session) — degrade gracefully:
+            // in-process locks still apply; cross-process protection is skipped.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Attempts to acquire the cross-process operation mutex, which serializes destructive
+    /// encrypt/decrypt work (and detects concurrent scans) across separate backend instances.
+    /// The named mutex is thread-affine, so callers must acquire and release it without awaiting
+    /// in between (release before any <see langword="await"/> that may hop threads).
+    /// </summary>
+    /// <param name="timeout">How long to wait for the lock before giving up.</param>
+    /// <param name="throwIfUnavailable">
+    /// When true (destructive operations), throws <see cref="InvalidOperationException"/> if the lock
+    /// cannot be acquired so the operation refuses to proceed. When false (scan), logs a prominent
+    /// warning and returns null so the caller proceeds non-destructively.
+    /// </param>
+    /// <param name="operation">Human-readable operation name for log messages.</param>
+    /// <returns>A handle that releases the mutex on dispose, or null if it was not acquired.</returns>
+    private CrossProcessLockHandle? TryAcquireCrossProcessLock(TimeSpan timeout, bool throwIfUnavailable, string operation)
+    {
+        if (_crossProcessMutex is null)
+        {
+            _logger.LogWarning("Cross-process operation lock is unavailable ({Operation}) — proceeding without it", operation);
+            return null;
+        }
+
+        try
+        {
+            if (_crossProcessMutex.WaitOne(timeout))
+                return new CrossProcessLockHandle(_crossProcessMutex);
+        }
+        catch (AbandonedMutexException)
+        {
+            // A previous instance crashed mid-operation; we now own the mutex.
+            _logger.LogWarning("Cross-process operation lock was abandoned by a previous instance ({Operation}) — taking ownership", operation);
+            return new CrossProcessLockHandle(_crossProcessMutex);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to acquire cross-process operation lock ({Operation})", operation);
+            return null;
+        }
+
+        if (throwIfUnavailable)
+        {
+            throw new InvalidOperationException(
+                "Another Collect backend instance is currently operating on this library. " +
+                "Stop the other instance (standalone server or WPF host) and try again.");
+        }
+
+        _logger.LogWarning(
+            "Another Collect backend instance appears to be operating on this library — proceeding without the cross-process lock ({Operation})",
+            operation);
+        return null;
+    }
+
+    /// <summary>
+    /// Disposable handle that releases the cross-process mutex on dispose.
+    /// </summary>
+    private sealed class CrossProcessLockHandle : IDisposable
+    {
+        private readonly Mutex _mutex;
+
+        public CrossProcessLockHandle(Mutex mutex) => _mutex = mutex;
+
+        public void Dispose()
+        {
+            try { _mutex.ReleaseMutex(); }
+            catch (ApplicationException) { /* Mutex not owned on the current thread — ignore. */ }
+        }
     }
 
     // ──────────────────────────────────────────────
@@ -96,6 +187,122 @@ public partial class AssetService : IAssetService
     }
 
     // ──────────────────────────────────────────────
+    //  File-Name Encryption Helpers
+    // ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns the encryption key when the current library encrypts on-disk file names AND is
+    /// unlocked; otherwise null. Name encryption/decryption only ever runs when both hold
+    /// (a locked name-encrypted library falls back to current behavior).
+    /// </summary>
+    private byte[]? GetFileNameEncryptionKey()
+    {
+        if (!_libraryService.EncryptsFileNames())
+            return null;
+        return _libraryService.GetEncryptionKey();
+    }
+
+    /// <summary>
+    /// Attempts to decrypt an on-disk basename (no extension) to its plaintext form.
+    /// Returns the plaintext basename on success, or null when the name is not encrypted with
+    /// the given key (a legacy plaintext on-disk name).
+    /// </summary>
+    private string? DecryptOnDiskBasename(string onDiskFileName, byte[] key)
+        => _encryptionService.TryDecryptFileName(onDiskFileName, key, out var plain)
+            ? plain
+            : null;
+
+    /// <summary>
+    /// Encrypts a plaintext basename (no extension) into its deterministic on-disk form.
+    /// </summary>
+    private string EncryptBasename(string plaintextBasename, byte[] key)
+        => _encryptionService.EncryptFileName(plaintextBasename, key);
+
+    /// <summary>
+    /// Builds the on-disk file name (encrypted basename + extension) for a plaintext basename.
+    /// </summary>
+    private string BuildOnDiskName(string plaintextBasename, string extension, byte[] key)
+        => EncryptBasename(plaintextBasename, key) + extension;
+
+    /// <summary>
+    /// Converts a plaintext relative path into the corresponding on-disk relative path by
+    /// encrypting its basename when file-name encryption is active. When no key is available
+    /// (feature off, or library locked) the input is returned unchanged.
+    /// </summary>
+    private string ToOnDiskRelativePath(string plaintextRelativePath, byte[]? nameKey)
+    {
+        if (nameKey is null)
+            return plaintextRelativePath;
+
+        var dir = Path.GetDirectoryName(plaintextRelativePath) ?? "";
+        var basename = Path.GetFileNameWithoutExtension(plaintextRelativePath);
+        var ext = Path.GetExtension(plaintextRelativePath);
+        var onDiskName = BuildOnDiskName(basename, ext, nameKey);
+        return string.IsNullOrEmpty(dir) ? onDiskName : dir + Path.DirectorySeparatorChar + onDiskName;
+    }
+
+    /// <summary>
+    /// Renames the on-disk basename of an asset to its deterministic encrypted form.
+    /// FileName stays plaintext; RelativePath is updated to the new on-disk path. Falls back to
+    /// plaintext-level suffixes (-01..-999) on collision. Never throws — on failure the file is
+    /// left as-is (legacy plaintext name) and a warning is logged.
+    /// </summary>
+    private void RenameOnDiskBasenameToEncrypted(string libraryPath, string sourceFullPath, Asset asset, byte[] nameKey)
+    {
+        var plaintextBasename = Path.GetFileNameWithoutExtension(asset.FileName);
+        var ext = Path.GetExtension(asset.FileName);
+        var onDiskName = BuildOnDiskName(plaintextBasename, ext, nameKey);
+        var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+        var onDiskRelPath = string.IsNullOrEmpty(oldDir) ? onDiskName : oldDir + Path.DirectorySeparatorChar + onDiskName;
+        var onDiskFullPath = Path.Combine(libraryPath, onDiskRelPath);
+
+        if (string.Equals(Path.GetFileName(asset.RelativePath), onDiskName, StringComparison.OrdinalIgnoreCase))
+            return; // basename already encrypted
+
+        if (File.Exists(onDiskFullPath))
+        {
+            // Collision — fall back to suffixing the plaintext basename, encrypting each candidate.
+            for (int i = 1; i <= 999; i++)
+            {
+                var suffixedPlain = $"{plaintextBasename}-{i:D2}{ext}";
+                var suffixedOnDisk = BuildOnDiskName(Path.GetFileNameWithoutExtension(suffixedPlain), ext, nameKey);
+                var suffixedRel = string.IsNullOrEmpty(oldDir) ? suffixedOnDisk : oldDir + Path.DirectorySeparatorChar + suffixedOnDisk;
+                if (File.Exists(Path.Combine(libraryPath, suffixedRel)))
+                    continue;
+
+                if (TryMoveWithRetry(sourceFullPath, Path.Combine(libraryPath, suffixedRel)))
+                {
+                    asset.FileName = suffixedPlain;
+                    asset.RelativePath = suffixedRel;
+                    _logger.LogInformation(
+                        "Encrypted on-disk name for asset {AssetId} (collision): {Plain} -> {OnDisk}",
+                        asset.Id, suffixedPlain, suffixedRel);
+                    return;
+                }
+            }
+
+            _logger.LogWarning(
+                "Could not encrypt on-disk name for asset {AssetId} (no unique name) — keeping {Path}",
+                asset.Id, sourceFullPath);
+            return;
+        }
+
+        if (TryMoveWithRetry(sourceFullPath, onDiskFullPath))
+        {
+            asset.RelativePath = onDiskRelPath;
+            _logger.LogInformation(
+                "Encrypted on-disk name for asset {AssetId}: {Plain} -> {OnDisk}",
+                asset.Id, asset.FileName, onDiskRelPath);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Failed to encrypt on-disk name for asset {AssetId} (move failed): {Path}",
+                asset.Id, sourceFullPath);
+        }
+    }
+
+    // ──────────────────────────────────────────────
     //  Scan
     // ──────────────────────────────────────────────
 
@@ -110,20 +317,59 @@ public partial class AssetService : IAssetService
         await _semaphore.WaitAsync();
         try
         {
-            // Load previous manifest for add/removed tracking
-            var previousManifest = AssetsManifest.Load(libraryPath);
-            var previousIds = new HashSet<string>(previousManifest.AssetIds, StringComparer.OrdinalIgnoreCase);
+            // Cross-process guard: scan is non-destructive, so only try the operation mutex briefly.
+            // If another backend instance is mid-encrypt/decrypt, log a prominent warning and proceed —
+            // the in-process _semaphore still serializes within this instance.
+            int added, removed;
+            using (CrossProcessLockHandle? crossProcessLock = TryAcquireCrossProcessLock(
+                       TimeSpan.FromMilliseconds(500), throwIfUnavailable: false, "library scan"))
+            {
+                var scanCounts = ScanFilesSync(libraryPath, collectDir);
+                added = scanCounts.Added;
+                removed = scanCounts.Removed;
+            }
 
-            var newAssets = new List<Asset>();
-            var added = 0;
-            var scannedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var scannedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var tagConflicts = await NormalizeTagsAsync();
 
-            var files = Directory.EnumerateFiles(libraryPath, "*.*", SearchOption.AllDirectories)
-                .Where(f => !f.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase)
-                    && ImageExtensions.Contains(Path.GetExtension(f)));
+            await _libraryService.UpdateAssetCountAsync(_assets.Count);
 
-            foreach (var filePath in files)
+            return new ScanResult
+            {
+                Added = added,
+                Removed = removed,
+                Total = _assets.Count,
+                TagConflicts = tagConflicts
+            };
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Runs the synchronous portion of a library scan while the caller holds <see cref="_semaphore"/>:
+    /// enumerates image files, creates/reconciles assets, encrypts newly-added plaintext files inline
+    /// (when the library is encrypted), saves the manifest, and cleans up orphaned thumbnails.
+    /// </summary>
+    private (int Added, int Removed, int Total) ScanFilesSync(string libraryPath, string collectDir)
+    {
+        // Load previous manifest for add/removed tracking
+        var previousManifest = AssetsManifest.Load(libraryPath);
+        var previousIds = new HashSet<string>(previousManifest.AssetIds, StringComparer.OrdinalIgnoreCase);
+
+        var newAssets = new List<Asset>();
+        var added = 0;
+        var scannedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var scannedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var files = Directory.EnumerateFiles(libraryPath, "*.*", SearchOption.AllDirectories)
+            .Where(f => !f.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase)
+                && ImageExtensions.Contains(Path.GetExtension(f)));
+
+        foreach (var filePath in files)
+        {
+            try
             {
                 var relativePath = Path.GetRelativePath(libraryPath, filePath);
                 scannedPaths.Add(relativePath);
@@ -144,7 +390,7 @@ public partial class AssetService : IAssetService
                 }
                 else
                 {
-                    var (asset, wasEncrypted) = CreateAssetFromFile(filePath, relativePath);
+                    var (asset, wasEncrypted, legacyPlaintextName) = CreateAssetFromFile(filePath, relativePath);
                     newAssets.Add(asset);
                     scannedIds.Add(asset.Id);
                     added++;
@@ -159,59 +405,97 @@ public partial class AssetService : IAssetService
                         }
                     }
 
+                    // File-name encryption: when the library encrypts names, ensure the on-disk
+                    // basename is encrypted. Covers both a newly added plaintext file and a legacy
+                    // plaintext name detected in CreateAssetFromFile. FileName/Tags stay plaintext;
+                    // RelativePath is updated to the encrypted on-disk path.
+                    var nameKey = GetFileNameEncryptionKey();
+                    if (nameKey is not null && legacyPlaintextName)
+                    {
+                        RenameOnDiskBasenameToEncrypted(libraryPath, filePath, asset, nameKey);
+                    }
+
                     // LAZY: No longer generate thumbnails during scan.
                     // Thumbnails are generated on-demand when the frontend requests them.
                 }
             }
-
-            var removed = previousIds.Count > 0
-                ? previousIds.Count(id => !scannedIds.Contains(id))
-                : _assets.Count(a => !scannedPaths.Contains(a.RelativePath));
-
-            _assets = newAssets;
-
-            // Save updated manifest
-            var manifest = new AssetsManifest { AssetIds = scannedIds.ToList() };
-            manifest.Save(libraryPath);
-
-            // Clean up orphaned thumbnails using asset IDs from manifest
-            _thumbnailService.CleanupOrphanedThumbnails(libraryPath, scannedIds);
-
-            var tagConflicts = await NormalizeTagsAsync();
-
-            await _libraryService.UpdateAssetCountAsync(_assets.Count);
-
-            return new ScanResult
+            catch (Exception ex)
             {
-                Added = added,
-                Removed = removed,
-                Total = _assets.Count,
-                TagConflicts = tagConflicts
-            };
+                // A single unreadable or problematic file must not abort the whole library scan.
+                _logger.LogWarning(ex, "Scan: skipping file {Path}: {Message}", filePath, ex.Message);
+            }
         }
-        finally
+
+        var removed = previousIds.Count > 0
+            ? previousIds.Count(id => !scannedIds.Contains(id))
+            : _assets.Count(a => !scannedPaths.Contains(a.RelativePath));
+
+        _assets = newAssets;
+
+        // Save updated manifest
+        var manifest = new AssetsManifest { AssetIds = scannedIds.ToList() };
+        manifest.Save(libraryPath);
+
+        // Clean up orphaned thumbnails using asset IDs from manifest
+        _thumbnailService.CleanupOrphanedThumbnails(libraryPath, scannedIds);
+
+        // Remove any leftover "*.collect-backup" sidecars from the retired backup mechanism
+        CleanupOrphanedBackups(libraryPath, collectDir);
+
+        return (added, removed, _assets.Count);
+    }
+
+    /// <summary>
+    /// Removes any leftover "*.collect-backup" sidecar files from the library. These were a retired
+    /// safety-net that copied the pre-rewrite bytes to disk before an atomic replace; they are no
+    /// longer created (atomic writes never truncate in place). Existing leftovers are deleted on scan
+    /// so no plaintext/ciphertext copies linger and bloat the library.
+    /// </summary>
+    private void CleanupOrphanedBackups(string libraryPath, string collectDir)
+    {
+        foreach (var backupFile in Directory.EnumerateFiles(libraryPath, "*.collect-backup", SearchOption.AllDirectories))
         {
-            _semaphore.Release();
+            if (backupFile.StartsWith(collectDir, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            try
+            {
+                File.Delete(backupFile);
+                _logger.LogInformation("Removed leftover backup {BackupFile}", backupFile);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete leftover backup {BackupFile}", backupFile);
+            }
         }
     }
 
-    private (Asset Asset, bool WasEncrypted) CreateAssetFromFile(string filePath, string relativePath)
+    private (Asset Asset, bool WasEncrypted, bool LegacyPlaintextName) CreateAssetFromFile(string filePath, string relativePath)
     {
         var fileInfo = new FileInfo(filePath);
-        var nameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
+        var onDiskNameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
+        var extension = fileInfo.Extension;
 
         string id;
         int width = 0, height = 0;
         bool wasEncrypted = false;
+        bool legacyPlaintextName = false;
+        string? detectedMime = null;
 
         var encryptionKey = _libraryService.GetEncryptionKey();
         if (encryptionKey is not null)
         {
             try
             {
-                // Decrypt once, use for both fingerprint and dimension extraction
+                // Decrypt once, use for both fingerprint and dimension extraction.
+                // IMPORTANT: fingerprint size must be decrypted.Length (plaintext size), NOT
+                // fileInfo.Length (on-disk encrypted size = plaintext + 28 bytes nonce/tag).
+                // Using the encrypted size makes the ID flip the first time a plaintext file gets
+                // encrypted, orphaning thumbnails and 404ing stale frontend IDs.
                 var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
-                id = ContentFingerprint.Compute(decrypted, fileInfo.Length);
+                detectedMime = ImageMimeDetector.Detect(decrypted);
+                id = ContentFingerprint.Compute(decrypted, decrypted.Length);
+                _logger.LogInformation("Scan: {File} is encrypted on disk ({Disk} bytes) → fingerprint {Id} (plaintext {Plain} bytes, mime={Mime})", filePath, fileInfo.Length, id, decrypted.Length, detectedMime ?? GetMimeType(filePath));
 
                 using var decryptedStream = new MemoryStream(decrypted);
                 using var codec = SKCodec.Create(decryptedStream);
@@ -224,8 +508,10 @@ public partial class AssetService : IAssetService
             }
             catch (AuthenticationTagMismatchException)
             {
-                // File not yet encrypted — fall through to plaintext
+                // File not yet encrypted — fall through to plaintext. Compute(filePath) reads the
+                // plaintext bytes with the plaintext size, so it matches the encrypted-case ID.
                 id = ContentFingerprint.Compute(filePath);
+                _logger.LogInformation("Scan: {File} is plaintext on disk → fingerprint {Id} (will be encrypted after scan)", filePath, id);
                 ExtractDimensionsPlaintext(filePath, out width, out height);
             }
         }
@@ -235,21 +521,43 @@ public partial class AssetService : IAssetService
             ExtractDimensionsPlaintext(filePath, out width, out height);
         }
 
+        // File-name decryption: when the library encrypts file names and a key is available,
+        // recover the plaintext basename so FileName/Tags come from plaintext. When decryption
+        // fails the on-disk name is a legacy plaintext name — it is kept as FileName here and
+        // renamed to its encrypted form by the caller (see ScanFilesSync).
+        var plaintextBasename = onDiskNameWithoutExt;
+        var nameEncryptionKey = GetFileNameEncryptionKey();
+        if (nameEncryptionKey is not null)
+        {
+            var decryptedName = DecryptOnDiskBasename(onDiskNameWithoutExt, nameEncryptionKey);
+            if (decryptedName is not null)
+            {
+                plaintextBasename = decryptedName;
+            }
+            else
+            {
+                legacyPlaintextName = true;
+                _logger.LogInformation(
+                    "Scan: {File} has a legacy plaintext name (not decryptable) — will be renamed to its encrypted form",
+                    filePath);
+            }
+        }
+
         var asset = new Asset
         {
             Id = id,
-            FileName = fileInfo.Name,
+            FileName = plaintextBasename + extension,
             RelativePath = relativePath,
             FileSize = fileInfo.Length,
             Width = width,
             Height = height,
-            MimeType = GetMimeType(filePath),
+            MimeType = detectedMime ?? GetMimeType(filePath),
             ImportedAt = DateTime.UtcNow,
             LastModified = fileInfo.LastWriteTimeUtc,
-            Tags = ParseTags(nameWithoutExt)
+            Tags = ParseTags(plaintextBasename)
         };
 
-        return (asset, wasEncrypted);
+        return (asset, wasEncrypted, legacyPlaintextName);
     }
 
     /// <summary>
@@ -313,20 +621,54 @@ public partial class AssetService : IAssetService
     }
 
     /// <summary>
-    /// Encrypt a file on disk in-place using the given encryption key.
-    /// Reads the plaintext file, encrypts, and overwrites with encrypted content.
+    /// Encrypt a file on disk in place using the given encryption key.
+    /// Reads the plaintext file, encrypts in memory, and atomically replaces the file on disk
+    /// (see <see cref="SafeFileIO.WriteAllBytesAtomic"/>). The source file is never truncated in
+    /// place — a failure leaves the original intact.
     /// </summary>
-    private void EncryptFileOnDisk(string filePath, byte[] encryptionKey)
+    /// <remarks>
+    /// Double-encryption guard: if the on-disk bytes do not match any known image format
+    /// (see <see cref="ImageMimeDetector.Detect"/>), the file is almost certainly already encrypted or
+    /// corrupt — it is skipped rather than re-encrypted (fail-safe: leaving a genuinely-plaintext exotic
+    /// image unencrypted is acceptable; corrupting it is not).
+    /// </remarks>
+    /// <returns>True if the file was successfully encrypted; false if it was skipped or failed.</returns>
+    private bool EncryptFileOnDisk(string filePath, byte[] encryptionKey)
     {
+        byte[] plaintext;
         try
         {
-            var plaintext = File.ReadAllBytes(filePath);
-            var encrypted = _encryptionService.Encrypt(plaintext, encryptionKey);
-            File.WriteAllBytes(filePath, encrypted);
+            plaintext = File.ReadAllBytes(filePath);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to encrypt file on disk: {FilePath}", filePath);
+            _logger.LogWarning(ex, "Failed to read file for encryption (original left untouched): {FilePath}", filePath);
+            return false;
+        }
+
+        // V2 double-encryption guard: bytes that don't look like a known image are almost certainly
+        // already-encrypted or corrupt — do NOT re-encrypt them.
+        if (ImageMimeDetector.Detect(plaintext) is null)
+        {
+            _logger.LogWarning(
+                "Skipping encryption of {FilePath}: {Len} bytes do not match a known image format (magic={Magic}); " +
+                "file is likely already encrypted or corrupt — left untouched",
+                filePath, plaintext.Length, ImageMimeDetector.MagicHex(plaintext));
+            return false;
+        }
+
+        try
+        {
+            var encrypted = _encryptionService.Encrypt(plaintext, encryptionKey);
+            SafeFileIO.WriteAllBytesAtomic(filePath, encrypted, _logger);
+            _logger.LogInformation("Encrypted {FilePath} ({PlainLen} bytes -> {EncryptedLen} bytes)", filePath, plaintext.Length, encrypted.Length);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // SafeFileIO guarantees the original file is intact here.
+            _logger.LogWarning(ex, "Encryption failed for {FilePath} — original file left intact", filePath);
+            return false;
         }
     }
 
@@ -492,11 +834,17 @@ public partial class AssetService : IAssetService
             var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
             var oldExt = Path.GetExtension(asset.FileName);
 
-            // Build new filename from tags
+            // Build new filename from tags (plaintext display name)
             var newFileName = BuildFileNameFromTags(tags, oldExt);
             var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
             var newRelativePath = string.IsNullOrEmpty(oldDir) ? newFileName : oldDir + Path.DirectorySeparatorChar + newFileName;
-            var newFilePath = Path.Combine(libraryPath, newRelativePath);
+
+            // When the library encrypts file names, the on-disk basename is the encrypted form of
+            // the plaintext basename; collision checks and File.Move run against the on-disk name
+            // while FileName stays plaintext. Suffix logic operates at the plaintext level.
+            var nameKey = GetFileNameEncryptionKey();
+            var newOnDiskRelativePath = ToOnDiskRelativePath(newRelativePath, nameKey);
+            var newFilePath = Path.Combine(libraryPath, newOnDiskRelativePath);
 
             // Only rename if the filename actually changed
             if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
@@ -513,25 +861,26 @@ public partial class AssetService : IAssetService
                     if (!TryMoveWithRetry(oldFilePath, newFilePath))
                         return false;
                     asset.FileName = newFileName;
-                    asset.RelativePath = newRelativePath;
+                    asset.RelativePath = newOnDiskRelativePath;
                 }
                 else
                 {
-                    // Collision: try numeric suffixes
+                    // Collision: try numeric suffixes (plaintext level), encrypting each candidate
                     var baseWithoutExt = Path.GetFileNameWithoutExtension(newFileName);
                     bool found = false;
                     for (int i = 1; i <= 999; i++)
                     {
                         var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
                         var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
-                        var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
+                        var suffixedOnDiskRelPath = ToOnDiskRelativePath(suffixedRelPath, nameKey);
+                        var suffixedPath = Path.Combine(libraryPath, suffixedOnDiskRelPath);
                         if (!File.Exists(suffixedPath))
                         {
                             try { _thumbnailService.DeleteThumbnail(libraryPath, asset.Id); } catch { }
                             if (TryMoveWithRetry(oldFilePath, suffixedPath))
                             {
                                 asset.FileName = suffixedName;
-                                asset.RelativePath = suffixedRelPath;
+                                asset.RelativePath = suffixedOnDiskRelPath;
                                 found = true;
                                 break;
                             }
@@ -768,6 +1117,8 @@ public partial class AssetService : IAssetService
         await _semaphore.WaitAsync();
         try
         {
+            var nameKey = GetFileNameEncryptionKey();
+
             foreach (var file in files)
             {
                 var ext = Path.GetExtension(file.FileName);
@@ -824,7 +1175,7 @@ public partial class AssetService : IAssetService
 
                     // Create asset entry
                     var relativePath = Path.GetRelativePath(libraryPath, destPath);
-                    var (asset, wasEncrypted) = CreateAssetFromFile(destPath, relativePath);
+                    var (asset, wasEncrypted, _) = CreateAssetFromFile(destPath, relativePath);
 
                     // Only encrypt if the library is encrypted AND file is not already encrypted
                     byte[]? encryptionKey = null;
@@ -835,6 +1186,15 @@ public partial class AssetService : IAssetService
                         {
                             EncryptFileOnDisk(destPath, encryptionKey);
                         }
+                    }
+
+                    // File-name encryption: when the library encrypts names, rename the on-disk
+                    // basename to its encrypted form (FileName stays plaintext; RelativePath points
+                    // at the encrypted on-disk name).
+                    if (nameKey is not null && _libraryService.IsEncryptedLibrary())
+                    {
+                        RenameOnDiskBasenameToEncrypted(libraryPath, destPath, asset, nameKey);
+                        destPath = Path.Combine(libraryPath, asset.RelativePath);
                     }
 
                     _assets.Add(asset);
@@ -849,9 +1209,10 @@ public partial class AssetService : IAssetService
                         var newExt = Path.GetExtension(destPath);
                         var newName = BuildFileNameFromTags(orderedTags, newExt);
                         var oldDir = Path.GetDirectoryName(destPath) ?? "";
-                        var newPath = Path.Combine(oldDir, newName);
+                        var newOnDiskFileName = ToOnDiskRelativePath(newName, nameKey);
+                        var newPath = Path.Combine(oldDir, newOnDiskFileName);
 
-                        if (!string.Equals(Path.GetFileName(destPath), newName, StringComparison.OrdinalIgnoreCase))
+                        if (!string.Equals(Path.GetFileName(destPath), newOnDiskFileName, StringComparison.OrdinalIgnoreCase))
                         {
                             if (!File.Exists(newPath))
                             {
@@ -864,12 +1225,13 @@ public partial class AssetService : IAssetService
                             }
                             else
                             {
-                                // Collision: try numeric suffixes
+                                // Collision: try numeric suffixes (plaintext level), encrypting each candidate
                                 var baseWithoutExt = Path.GetFileNameWithoutExtension(newName);
                                 for (int i = 1; i <= 999; i++)
                                 {
                                     var suffixedName = $"{baseWithoutExt}-{i:D2}{newExt}";
-                                    var suffixedPath = Path.Combine(oldDir, suffixedName);
+                                    var suffixedOnDiskFileName = ToOnDiskRelativePath(suffixedName, nameKey);
+                                    var suffixedPath = Path.Combine(oldDir, suffixedOnDiskFileName);
                                     if (!File.Exists(suffixedPath))
                                     {
                                         _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
@@ -966,7 +1328,13 @@ public partial class AssetService : IAssetService
             // Update asset metadata (under lock so ScanAsync doesn't interfere)
             var finalFileName = Path.GetFileName(newRelativePath);
             asset.RelativePath = newRelativePath;
-            asset.FileName = finalFileName;
+
+            // Name-encrypted libraries keep FileName as the plaintext display name: the move only
+            // changes the folder, so FileName must not be replaced by the (encrypted) on-disk name.
+            if (GetFileNameEncryptionKey() is null)
+            {
+                asset.FileName = finalFileName;
+            }
 
             return MapToDetailDto(asset);
         }
@@ -1059,90 +1427,98 @@ public partial class AssetService : IAssetService
         {
             var encryptionKey = _libraryService.GetEncryptionKey();
 
-            // Decrypt the file if the library is encrypted
-            SKCodec codec;
+            // Decrypt the file if the library is encrypted.
+            // IMPORTANT: the stream must stay open for the whole decode — SKCodec created from
+            // a stream reads from it lazily, so disposing the stream before decoding throws
+            // ObjectDisposedException (which used to surface as a silent 404 "not found").
             if (encryptionKey is not null)
             {
                 var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
                 using var decryptedStream = new MemoryStream(decrypted);
-                codec = SKCodec.Create(decryptedStream);
-            }
-            else
-            {
-                using var input = File.OpenRead(filePath);
-                codec = SKCodec.Create(input);
+                return EncodeClipboardPng(decryptedStream);
             }
 
-            if (codec is null) return null;
-
-            var info = codec.Info;
-            var maxDim = Math.Max(info.Width, info.Height);
-
-            using var original = SKBitmap.Decode(codec);
-            if (original is null) return null;
-
-            SKBitmap? finalBitmap;
-            if (maxDim > 2000)
-            {
-                float scale = 2000f / maxDim;
-                int newWidth = Math.Max(1, (int)(info.Width * scale));
-                int newHeight = Math.Max(1, (int)(info.Height * scale));
-                finalBitmap = original.Resize(new SKSizeI(newWidth, newHeight), new SKSamplingOptions(SKFilterMode.Linear));
-                if (finalBitmap is null) return null;
-            }
-            else
-            {
-                finalBitmap = original;
-            }
-
-            using var image = SKImage.FromBitmap(finalBitmap);
-            using var data = image.Encode(SKEncodedImageFormat.Png, 100);
-            var bytes = data.ToArray();
-
-            if (finalBitmap != original)
-                finalBitmap.Dispose();
-
-            return bytes;
+            using var input = File.OpenRead(filePath);
+            return EncodeClipboardPng(input);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Clipboard image failed for asset {Id} at {Path}", id, filePath);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Decode an image stream and re-encode it as PNG (max 2000px on the longest side) for
+    /// clipboard copying. The caller must keep <paramref name="stream"/> open for the duration
+    /// of this call, because <see cref="SKCodec"/> reads from the stream lazily.
+    /// </summary>
+    private static byte[]? EncodeClipboardPng(Stream stream)
+    {
+        using var codec = SKCodec.Create(stream);
+        if (codec is null) return null;
+
+        var info = codec.Info;
+        var maxDim = Math.Max(info.Width, info.Height);
+
+        using var original = SKBitmap.Decode(codec);
+        if (original is null) return null;
+
+        SKBitmap? finalBitmap;
+        if (maxDim > 2000)
+        {
+            float scale = 2000f / maxDim;
+            int newWidth = Math.Max(1, (int)(info.Width * scale));
+            int newHeight = Math.Max(1, (int)(info.Height * scale));
+            finalBitmap = original.Resize(new SKSizeI(newWidth, newHeight), new SKSamplingOptions(SKFilterMode.Linear));
+            if (finalBitmap is null) return null;
+        }
+        else
+        {
+            finalBitmap = original;
+        }
+
+        using var image = SKImage.FromBitmap(finalBitmap);
+        using var data = image.Encode(SKEncodedImageFormat.Png, 100);
+        var bytes = data.ToArray();
+
+        if (finalBitmap != original)
+            finalBitmap.Dispose();
+
+        return bytes;
     }
 
     public async Task<string?> GetThumbnailPathAsync(string id)
     {
         var libraryPath = _libraryService.GetLibraryPath();
-        if (libraryPath is null) return null;
+        if (libraryPath is null)
+        {
+            _logger.LogWarning("Thumbnail: library path is null for asset {Id}", id);
+            return null;
+        }
 
         var asset = await GetAssetAsync(id);
-        if (asset is null) return null;
+        if (asset is null)
+        {
+            _logger.LogWarning("Thumbnail: asset {Id} not found (in-memory assets: {Count})", id, _assets.Count);
+            return null;
+        }
 
         var sourcePath = Path.Combine(libraryPath, asset.RelativePath);
         if (!File.Exists(sourcePath))
+        {
+            _logger.LogWarning("Thumbnail: source file missing for asset {Id}: {Path}", id, sourcePath);
             return null;
+        }
 
         var encryptionKey = _libraryService.GetEncryptionKey();
 
-        // When a new thumbnail is generated, also compute the color palette from it
-        return _thumbnailService.GetOrCreateThumbnail(libraryPath, sourcePath, asset.Id, encryptionKey, resized =>
-        {
-            try
-            {
-                var palette = ColorPaletteHelper.ComputeFromBitmap(resized);
-                if (palette is not null)
-                {
-                    var store = PalettesStore.Load(libraryPath);
-                    store.Palettes[id] = palette;
-                    store.Save(libraryPath);
-                    asset.Palette = palette;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to compute color palette from thumbnail for asset {AssetId}", id);
-            }
-        });
+        // Palettes are intentionally NOT computed here: they are only computed on demand when the
+        // asset detail (sidebar) is opened, so the gallery/waterfall path stays fast.
+        var thumbPath = _thumbnailService.GetOrCreateThumbnail(libraryPath, sourcePath, asset.Id, encryptionKey);
+        if (thumbPath is null)
+            _logger.LogWarning("Thumbnail: generation failed for asset {Id} (source {Path}, key present: {Key})", id, sourcePath, encryptionKey is not null);
+        return thumbPath;
     }
 
     // ──────────────────────────────────────────────
@@ -1188,6 +1564,7 @@ public partial class AssetService : IAssetService
 
         // Auto-convert untyped tags and reorder
         var libraryPathForRename = _libraryService.GetLibraryPath();
+        var nameKey = GetFileNameEncryptionKey();
         foreach (var asset in _assets)
         {
             // Save original tags so we can revert if file rename fails
@@ -1219,7 +1596,8 @@ public partial class AssetService : IAssetService
                 var newFileName = BuildFileNameFromTags(asset.Tags, oldExt);
                 var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
                 var newRelativePath = string.IsNullOrEmpty(oldDir) ? newFileName : oldDir + Path.DirectorySeparatorChar + newFileName;
-                var newFilePath = Path.Combine(libraryPathForRename, newRelativePath);
+                var newOnDiskRelativePath = ToOnDiskRelativePath(newRelativePath, nameKey);
+                var newFilePath = Path.Combine(libraryPathForRename, newOnDiskRelativePath);
 
                 if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                 {
@@ -1248,7 +1626,7 @@ public partial class AssetService : IAssetService
                                 "[NormalizeTagsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {NewFile}",
                                 asset.Id, asset.FileName, newFileName);
                             asset.FileName = newFileName;
-                            asset.RelativePath = newRelativePath;
+                            asset.RelativePath = newOnDiskRelativePath;
                         }
                         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                         {
@@ -1268,7 +1646,8 @@ public partial class AssetService : IAssetService
                         {
                             var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
                             var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
-                            var suffixedPath = Path.Combine(libraryPathForRename, suffixedRelPath);
+                            var suffixedOnDiskRelPath = ToOnDiskRelativePath(suffixedRelPath, nameKey);
+                            var suffixedPath = Path.Combine(libraryPathForRename, suffixedOnDiskRelPath);
                             if (!File.Exists(suffixedPath))
                             {
                                 try { _thumbnailService.DeleteThumbnail(libraryPathForRename, asset.Id); } catch { }
@@ -1279,7 +1658,7 @@ public partial class AssetService : IAssetService
                                         "[NormalizeTagsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {SuffixedName}",
                                         asset.Id, asset.FileName, suffixedName);
                                     asset.FileName = suffixedName;
-                                    asset.RelativePath = suffixedRelPath;
+                                    asset.RelativePath = suffixedOnDiskRelPath;
                                     found = true;
                                     break;
                                 }
@@ -1602,6 +1981,7 @@ public partial class AssetService : IAssetService
         await _semaphore.WaitAsync();
         try
         {
+            var nameKey = GetFileNameEncryptionKey();
             foreach (var change in request.Changes)
             {
                 foreach (var asset in _assets)
@@ -1638,7 +2018,8 @@ public partial class AssetService : IAssetService
                         var newRelativePath = string.IsNullOrEmpty(oldDir)
                             ? newFileName
                             : oldDir + Path.DirectorySeparatorChar + newFileName;
-                        var newFilePath = Path.Combine(libraryPath, newRelativePath);
+                        var newOnDiskRelativePath = ToOnDiskRelativePath(newRelativePath, nameKey);
+                        var newFilePath = Path.Combine(libraryPath, newOnDiskRelativePath);
 
                         if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                         {
@@ -1667,7 +2048,7 @@ public partial class AssetService : IAssetService
                                         "[CategorizeTagsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {NewFile}",
                                         asset.Id, asset.FileName, newFileName);
                                     asset.FileName = newFileName;
-                                    asset.RelativePath = newRelativePath;
+                                    asset.RelativePath = newOnDiskRelativePath;
                                 }
                                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                                 {
@@ -1687,7 +2068,8 @@ public partial class AssetService : IAssetService
                                 {
                                     var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
                                     var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
-                                    var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
+                                    var suffixedOnDiskRelPath = ToOnDiskRelativePath(suffixedRelPath, nameKey);
+                                    var suffixedPath = Path.Combine(libraryPath, suffixedOnDiskRelPath);
                                     if (!File.Exists(suffixedPath))
                                     {
                                         try { _thumbnailService.DeleteThumbnail(libraryPath, asset.Id); } catch { }
@@ -1698,7 +2080,7 @@ public partial class AssetService : IAssetService
                                                 "[CategorizeTagsAsync] Successfully renamed asset {AssetId}: {OldFile} -> {SuffixedName}",
                                                 asset.Id, asset.FileName, suffixedName);
                                             asset.FileName = suffixedName;
-                                            asset.RelativePath = suffixedRelPath;
+                                            asset.RelativePath = suffixedOnDiskRelPath;
                                             found = true;
                                             break;
                                         }
@@ -1749,6 +2131,7 @@ public partial class AssetService : IAssetService
         await _semaphore.WaitAsync();
         try
         {
+            var nameKey = GetFileNameEncryptionKey();
             foreach (var asset in _assets)
             {
                 bool tagsChanged = false;
@@ -1779,7 +2162,8 @@ public partial class AssetService : IAssetService
                     var newRelativePath = string.IsNullOrEmpty(oldDir)
                         ? newFileName
                         : oldDir + Path.DirectorySeparatorChar + newFileName;
-                    var newFilePath = Path.Combine(libraryPath, newRelativePath);
+                    var newOnDiskRelativePath = ToOnDiskRelativePath(newRelativePath, nameKey);
+                    var newFilePath = Path.Combine(libraryPath, newOnDiskRelativePath);
 
                     if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -1788,7 +2172,7 @@ public partial class AssetService : IAssetService
                             _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                             File.Move(oldFilePath, newFilePath);
                             asset.FileName = newFileName;
-                            asset.RelativePath = newRelativePath;
+                            asset.RelativePath = newOnDiskRelativePath;
                         }
                     }
                 }
@@ -1833,6 +2217,7 @@ public partial class AssetService : IAssetService
         await _semaphore.WaitAsync();
         try
         {
+            var nameKey = GetFileNameEncryptionKey();
             foreach (var asset in _assets)
             {
                 bool tagsChanged = false;
@@ -1862,7 +2247,8 @@ public partial class AssetService : IAssetService
                     var newRelativePath = string.IsNullOrEmpty(oldDir)
                         ? newFileName
                         : oldDir + Path.DirectorySeparatorChar + newFileName;
-                    var newFilePath = Path.Combine(libraryPath, newRelativePath);
+                    var newOnDiskRelativePath = ToOnDiskRelativePath(newRelativePath, nameKey);
+                    var newFilePath = Path.Combine(libraryPath, newOnDiskRelativePath);
 
                     if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -1871,7 +2257,7 @@ public partial class AssetService : IAssetService
                             _thumbnailService.DeleteThumbnail(libraryPath, asset.Id);
                             File.Move(oldFilePath, newFilePath);
                             asset.FileName = newFileName;
-                            asset.RelativePath = newRelativePath;
+                            asset.RelativePath = newOnDiskRelativePath;
                         }
                     }
                 }
@@ -1908,6 +2294,7 @@ public partial class AssetService : IAssetService
         await _semaphore.WaitAsync();
         try
         {
+            var nameKey = GetFileNameEncryptionKey();
             foreach (var asset in _assets)
             {
                 // Save original tags BEFORE modifying — needed to revert if file rename fails
@@ -1941,7 +2328,8 @@ public partial class AssetService : IAssetService
                     var newRelativePath = string.IsNullOrEmpty(oldDir)
                         ? newFileName
                         : oldDir + Path.DirectorySeparatorChar + newFileName;
-                    var newFilePath = Path.Combine(libraryPath, newRelativePath);
+                    var newOnDiskRelativePath = ToOnDiskRelativePath(newRelativePath, nameKey);
+                    var newFilePath = Path.Combine(libraryPath, newOnDiskRelativePath);
 
                     if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -1970,7 +2358,7 @@ public partial class AssetService : IAssetService
                                     "[RenameTagValueAsync] Successfully renamed asset {AssetId}: {OldFile} -> {NewFile}",
                                     asset.Id, asset.FileName, newFileName);
                                 asset.FileName = newFileName;
-                                asset.RelativePath = newRelativePath;
+                                asset.RelativePath = newOnDiskRelativePath;
                             }
                             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                             {
@@ -1990,7 +2378,8 @@ public partial class AssetService : IAssetService
                             {
                                 var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
                                 var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
-                                var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
+                                var suffixedOnDiskRelPath = ToOnDiskRelativePath(suffixedRelPath, nameKey);
+                                var suffixedPath = Path.Combine(libraryPath, suffixedOnDiskRelPath);
                                 if (!File.Exists(suffixedPath))
                                 {
                                     try { _thumbnailService.DeleteThumbnail(libraryPath, asset.Id); } catch { }
@@ -2001,7 +2390,7 @@ public partial class AssetService : IAssetService
                                             "[RenameTagValueAsync] Successfully renamed asset {AssetId}: {OldFile} -> {SuffixedName}",
                                             asset.Id, asset.FileName, suffixedName);
                                         asset.FileName = suffixedName;
-                                        asset.RelativePath = suffixedRelPath;
+                                        asset.RelativePath = suffixedOnDiskRelPath;
                                         found = true;
                                         break;
                                     }
@@ -2041,6 +2430,67 @@ public partial class AssetService : IAssetService
     /// When repairing a non-encrypted library, provide the original password.
     /// Returns the number of files decrypted.
     /// </summary>
+    /// <summary>
+    /// Encrypts every thumbnail in .collect/thumbnails with the library key so the whole library
+    /// is consistently encrypted. Plaintext thumbnails are detected by magic bytes and encrypted;
+    /// already-encrypted ones are skipped. Never throws — per-file failures are logged.
+    /// </summary>
+    private void EncryptAllThumbnails(string libraryPath, byte[] encryptionKey)
+    {
+        var thumbDir = Path.Combine(libraryPath, ".collect", "thumbnails");
+        if (!Directory.Exists(thumbDir))
+            return;
+
+        foreach (var thumbFile in Directory.EnumerateFiles(thumbDir, "*.webp"))
+        {
+            try
+            {
+                var plaintext = File.ReadAllBytes(thumbFile);
+                // Only encrypt plaintext thumbnails (known image magic present).
+                if (ImageMimeDetector.Detect(plaintext) is null)
+                    continue;
+
+                var encrypted = _encryptionService.Encrypt(plaintext, encryptionKey);
+                SafeFileIO.WriteAllBytesAtomic(thumbFile, encrypted, _logger);
+                _logger.LogInformation("Encrypted thumbnail {Thumb}", thumbFile);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to encrypt thumbnail {Thumb}", thumbFile);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Decrypts every thumbnail in .collect/thumbnails back to plaintext so thumbnails keep
+    /// working after the library is decrypted. Already-plaintext thumbnails are left as-is.
+    /// Never throws — per-file failures are logged.
+    /// </summary>
+    private void DecryptAllThumbnails(string libraryPath, byte[] encryptionKey)
+    {
+        var thumbDir = Path.Combine(libraryPath, ".collect", "thumbnails");
+        if (!Directory.Exists(thumbDir))
+            return;
+
+        foreach (var thumbFile in Directory.EnumerateFiles(thumbDir, "*.webp"))
+        {
+            try
+            {
+                var plaintext = _encryptionService.ReadAndDecryptFile(thumbFile, encryptionKey);
+                SafeFileIO.WriteAllBytesAtomic(thumbFile, plaintext, _logger);
+                _logger.LogInformation("Decrypted thumbnail {Thumb}", thumbFile);
+            }
+            catch (AuthenticationTagMismatchException)
+            {
+                // Already plaintext — nothing to do.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to decrypt thumbnail {Thumb}", thumbFile);
+            }
+        }
+    }
+
     public async Task<int> EncryptLibraryAsync(string password)
     {
         var libraryPath = _libraryService.GetLibraryPath();
@@ -2060,14 +2510,34 @@ public partial class AssetService : IAssetService
         await _semaphore.WaitAsync();
         try
         {
-            foreach (var asset in _assets)
+            // Destructive operation — refuse to run while another backend instance is mid-operation.
+            using (CrossProcessLockHandle? crossProcessLock = TryAcquireCrossProcessLock(
+                       TimeSpan.FromSeconds(5), throwIfUnavailable: true, "library encrypt"))
             {
-                var filePath = Path.Combine(libraryPath, asset.RelativePath);
-                if (!File.Exists(filePath))
-                    continue;
+                foreach (var asset in _assets)
+                {
+                    var filePath = Path.Combine(libraryPath, asset.RelativePath);
+                    if (!File.Exists(filePath))
+                        continue;
 
-                EncryptFileOnDisk(filePath, encryptionKey);
-                encrypted++;
+                    if (EncryptFileOnDisk(filePath, encryptionKey))
+                        encrypted++;
+                }
+
+                // File-name encryption is always enabled: after content encryption, rename each
+                // on-disk basename to its deterministic encrypted form. FileName stays plaintext;
+                // RelativePath tracks the encrypted on-disk path.
+                foreach (var asset in _assets)
+                {
+                    var filePath = Path.Combine(libraryPath, asset.RelativePath);
+                    if (!File.Exists(filePath))
+                        continue;
+
+                    RenameOnDiskBasenameToEncrypted(libraryPath, filePath, asset, encryptionKey);
+                }
+
+                // Also encrypt all thumbnails so the whole library is consistently encrypted.
+                EncryptAllThumbnails(libraryPath, encryptionKey);
             }
 
             // Update library.json with encryption metadata
@@ -2077,6 +2547,7 @@ public partial class AssetService : IAssetService
                 info.Salt = Convert.ToBase64String(salt);
                 info.VerificationHash = Convert.ToBase64String(verificationHash);
                 info.AssetCount = _assets.Count;
+                info.EncryptFileNames = true;
             });
 
             // Update registry
@@ -2086,6 +2557,8 @@ public partial class AssetService : IAssetService
         {
             _semaphore.Release();
         }
+
+        _logger.LogInformation("EncryptLibrary: encrypted {Count} file(s)", encrypted);
 
         return encrypted;
     }
@@ -2159,31 +2632,141 @@ public partial class AssetService : IAssetService
         await EnsureScannedAsync();
 
         int decrypted = 0;
+        int failed = 0;
+        int skippedMismatch = 0;
+        var failedPaths = new List<string>();
 
         await _semaphore.WaitAsync();
         try
         {
-            foreach (var asset in _assets)
+            // Destructive operation — refuse to run while another backend instance is mid-operation.
+            using (CrossProcessLockHandle? crossProcessLock = TryAcquireCrossProcessLock(
+                       TimeSpan.FromSeconds(5), throwIfUnavailable: true, "library decrypt"))
             {
-                var filePath = Path.Combine(libraryPath, asset.RelativePath);
-                if (!File.Exists(filePath))
-                    continue;
+                foreach (var asset in _assets)
+                {
+                    var filePath = Path.Combine(libraryPath, asset.RelativePath);
+                    if (!File.Exists(filePath))
+                        continue;
 
-                try
-                {
-                    // Try to decrypt and overwrite with plaintext
-                    var plaintext = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
-                    File.WriteAllBytes(filePath, plaintext);
-                    decrypted++;
+                    try
+                    {
+                        // Decrypt in memory first — the file is only touched after a successful decrypt.
+                        var plaintext = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
+
+                        // Plaintext verification: never write empty decrypted bytes (corrupt ciphertext).
+                        // A null magic is only a warning — some valid image formats are exotic and not in
+                        // the detector, so they are still written.
+                        if (plaintext.Length == 0)
+                        {
+                            failed++;
+                            failedPaths.Add(filePath);
+                            _logger.LogWarning("Decrypt: empty plaintext for {Path} — file left untouched", filePath);
+                            continue;
+                        }
+
+                        if (ImageMimeDetector.Detect(plaintext) is null)
+                        {
+                            _logger.LogWarning(
+                                "Decrypt: plaintext for {Path} does not match a known image format (magic={Magic}) — writing anyway",
+                                filePath, ImageMimeDetector.MagicHex(plaintext));
+                        }
+
+                        SafeFileIO.WriteAllBytesAtomic(filePath, plaintext, _logger);
+                        decrypted++;
+                    }
+                    catch (AuthenticationTagMismatchException)
+                    {
+                        // File is not encrypted with the current key — skip WITHOUT touching it.
+                        skippedMismatch++;
+                        _logger.LogWarning("Decrypt: tag mismatch for {Path} — not encrypted with the current key; left untouched", filePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        // The atomic helper guarantees the original file is intact here.
+                        failed++;
+                        failedPaths.Add(filePath);
+                        _logger.LogWarning(ex, "Decrypt failed for {Path} — original file left intact", filePath);
+                    }
                 }
-                catch (AuthenticationTagMismatchException)
+
+                // File-name decryption: when the library was encrypting file names, restore the
+                // plaintext basenames. FileName stays plaintext; RelativePath is updated to the
+                // plaintext on-disk path.
+                if (_libraryService.EncryptsFileNames())
                 {
-                    // File is not encrypted, skip
+                    foreach (var asset in _assets)
+                    {
+                        var oldFilePath = Path.Combine(libraryPath, asset.RelativePath);
+                        if (!File.Exists(oldFilePath))
+                            continue;
+
+                        var onDiskBasename = Path.GetFileNameWithoutExtension(asset.RelativePath);
+                        if (!_encryptionService.TryDecryptFileName(onDiskBasename, encryptionKey, out var plaintextBasename))
+                        {
+                            _logger.LogInformation(
+                                "Decrypt: name of {Path} is already plaintext (not decryptable) — skipped",
+                                oldFilePath);
+                            continue;
+                        }
+
+                        var ext = Path.GetExtension(asset.RelativePath);
+                        var plaintextName = plaintextBasename + ext;
+                        var oldDir = Path.GetDirectoryName(asset.RelativePath) ?? "";
+                        var plaintextRelPath = string.IsNullOrEmpty(oldDir) ? plaintextName : oldDir + Path.DirectorySeparatorChar + plaintextName;
+                        var plaintextFullPath = Path.Combine(libraryPath, plaintextRelPath);
+
+                        if (string.Equals(Path.GetFileName(asset.RelativePath), plaintextName, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        if (File.Exists(plaintextFullPath))
+                        {
+                            // Collision — plaintext-level suffix fallback
+                            var renamed = false;
+                            for (int i = 1; i <= 999; i++)
+                            {
+                                var suffixedPlain = $"{plaintextBasename}-{i:D2}{ext}";
+                                var suffixedRel = string.IsNullOrEmpty(oldDir) ? suffixedPlain : oldDir + Path.DirectorySeparatorChar + suffixedPlain;
+                                if (File.Exists(Path.Combine(libraryPath, suffixedRel)))
+                                    continue;
+
+                                if (TryMoveWithRetry(oldFilePath, Path.Combine(libraryPath, suffixedRel)))
+                                {
+                                    asset.FileName = suffixedPlain;
+                                    asset.RelativePath = suffixedRel;
+                                    renamed = true;
+                                    _logger.LogInformation(
+                                        "Decrypt: restored plaintext name for asset {AssetId} (collision): {OnDisk} -> {Plain}",
+                                        asset.Id, onDiskBasename, suffixedPlain);
+                                    break;
+                                }
+                            }
+                            if (!renamed)
+                            {
+                                _logger.LogWarning(
+                                    "Decrypt: could not restore plaintext name for asset {AssetId} (no unique name) — keeping {Path}",
+                                    asset.Id, oldFilePath);
+                            }
+                        }
+                        else if (TryMoveWithRetry(oldFilePath, plaintextFullPath))
+                        {
+                            asset.FileName = plaintextName;
+                            asset.RelativePath = plaintextRelPath;
+                            _logger.LogInformation(
+                                "Decrypt: restored plaintext name for asset {AssetId}: {OnDisk} -> {Plain}",
+                                asset.Id, onDiskBasename, plaintextName);
+                        }
+                        else
+                        {
+                            _logger.LogWarning(
+                                "Decrypt: failed to restore plaintext name for asset {AssetId} (move failed): {Path}",
+                                asset.Id, oldFilePath);
+                        }
+                    }
                 }
-                catch
-                {
-                    // Other errors, skip
-                }
+
+                // Also decrypt all thumbnails so they keep working after the library is decrypted.
+                DecryptAllThumbnails(libraryPath, encryptionKey);
             }
 
             // Remove encryption metadata from library.json
@@ -2192,6 +2775,7 @@ public partial class AssetService : IAssetService
                 info.IsEncrypted = false;
                 info.Salt = null;
                 info.VerificationHash = null;
+                info.EncryptFileNames = false;
                 info.AssetCount = _assets.Count;
             });
 
@@ -2204,6 +2788,20 @@ public partial class AssetService : IAssetService
         finally
         {
             _semaphore.Release();
+        }
+
+        if (failed > 0)
+        {
+            var sample = string.Join(", ", failedPaths.Take(5));
+            _logger.LogError(
+                "DecryptLibrary: {Failed} file(s) could not be decrypted ({Decrypted} decrypted, {Skipped} tag-mismatch skipped). First paths: {Paths}",
+                failed, decrypted, skippedMismatch, sample);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "DecryptLibrary: decrypted {Decrypted} file(s); skipped {Skipped} (not encrypted with the current key)",
+                decrypted, skippedMismatch);
         }
 
         return decrypted;
@@ -2221,6 +2819,7 @@ public partial class AssetService : IAssetService
         await _semaphore.WaitAsync();
         try
         {
+            var nameKey = GetFileNameEncryptionKey();
             foreach (var asset in _assets)
             {
                 // Save original tags BEFORE modifying — needed to revert if file rename fails
@@ -2252,7 +2851,8 @@ public partial class AssetService : IAssetService
                     var newRelativePath = string.IsNullOrEmpty(oldDir)
                         ? newFileName
                         : oldDir + Path.DirectorySeparatorChar + newFileName;
-                    var newFilePath = Path.Combine(libraryPath, newRelativePath);
+                    var newOnDiskRelativePath = ToOnDiskRelativePath(newRelativePath, nameKey);
+                    var newFilePath = Path.Combine(libraryPath, newOnDiskRelativePath);
 
                     if (!string.Equals(asset.FileName, newFileName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -2281,7 +2881,7 @@ public partial class AssetService : IAssetService
                                     "[DeleteTagValueAsync] Successfully renamed asset {AssetId}: {OldFile} -> {NewFile}",
                                     asset.Id, asset.FileName, newFileName);
                                 asset.FileName = newFileName;
-                                asset.RelativePath = newRelativePath;
+                                asset.RelativePath = newOnDiskRelativePath;
                             }
                             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                             {
@@ -2301,7 +2901,8 @@ public partial class AssetService : IAssetService
                             {
                                 var suffixedName = $"{baseWithoutExt}-{i:D2}{oldExt}";
                                 var suffixedRelPath = string.IsNullOrEmpty(oldDir) ? suffixedName : oldDir + Path.DirectorySeparatorChar + suffixedName;
-                                var suffixedPath = Path.Combine(libraryPath, suffixedRelPath);
+                                var suffixedOnDiskRelPath = ToOnDiskRelativePath(suffixedRelPath, nameKey);
+                                var suffixedPath = Path.Combine(libraryPath, suffixedOnDiskRelPath);
                                 if (!File.Exists(suffixedPath))
                                 {
                                     try { _thumbnailService.DeleteThumbnail(libraryPath, asset.Id); } catch { }
@@ -2312,7 +2913,7 @@ public partial class AssetService : IAssetService
                                             "[DeleteTagValueAsync] Successfully renamed asset {AssetId}: {OldFile} -> {SuffixedName}",
                                             asset.Id, asset.FileName, suffixedName);
                                         asset.FileName = suffixedName;
-                                        asset.RelativePath = suffixedRelPath;
+                                        asset.RelativePath = suffixedOnDiskRelPath;
                                         found = true;
                                         break;
                                     }

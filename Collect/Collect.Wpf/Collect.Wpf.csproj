@@ -30,4 +30,32 @@
     <ProjectReference Include="..\Collect.Core\Collect.Core.csproj" />
   </ItemGroup>
 
+  <!--
+    Copies the built React frontend (chakra-app/build) into the output directory
+    as chakra-app/, which CollectHost uses as WebRootPath at runtime
+    (see MainWindow.xaml.cs -> CollectHost.StartAsync).
+
+    Runs after every Build for all configurations (Debug/Release). The frontend
+    itself must be built manually first (cd chakra-app && npm run build); if it
+    hasn't been built yet, this target is skipped without error.
+  -->
+  <Target Name="CopyFrontendToOutput" AfterTargets="Build"
+          Condition="Exists('$(MSBuildProjectDirectory)\..\..\chakra-app\build')">
+
+    <!-- Remove stale hashed assets (old JS/CSS bundles) from a previous build. -->
+    <RemoveDir Directories="$(TargetDir)chakra-app\static"
+               Condition="Exists('$(TargetDir)chakra-app\static')" />
+
+    <ItemGroup>
+      <_FrontendBuildFiles Include="$(MSBuildProjectDirectory)\..\..\chakra-app\build\**\*" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(_FrontendBuildFiles)"
+          DestinationFiles="@(_FrontendBuildFiles->'$(TargetDir)chakra-app\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+
+    <Message Importance="high"
+             Text="Frontend build copied to $(TargetDir)chakra-app (from chakra-app/build)." />
+  </Target>
+
 </Project>

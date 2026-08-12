@@ -114,6 +114,7 @@ public class CollectHost
 
         // ── Middleware ─────────────────────────────────────────
         app.UseMiddleware<Middleware.ErrorHandlingMiddleware>();
+        app.UseMiddleware<Middleware.RetryMiddleware>();
         app.UseMiddleware<Middleware.LibraryContextMiddleware>();
 
         // CORS (must be before static files and controllers)

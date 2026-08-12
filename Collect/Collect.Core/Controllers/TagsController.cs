@@ -8,10 +8,12 @@ namespace Collect.Core.Controllers;
 public class TagsController : ControllerBase
 {
     private readonly ITagService _tagService;
+    private readonly ILibraryService _libraryService;
 
-    public TagsController(ITagService tagService)
+    public TagsController(ITagService tagService, ILibraryService libraryService)
     {
         _tagService = tagService;
+        _libraryService = libraryService;
     }
 
     /// <summary>
@@ -24,7 +26,14 @@ public class TagsController : ControllerBase
         [FromQuery] int size = 50,
         [FromQuery] string? search = null)
     {
+        // Strict mode: a name-encrypted library that is locked must not reveal real names/tags.
+        if (_libraryService.IsEncryptedLibrary() && _libraryService.EncryptsFileNames() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
         var result = await _tagService.GetTagGroupsAsync(page, size, search);
         return Ok(result);
     }
+
+    private string? GetUnlockToken() =>
+        Request.Headers.TryGetValue("X-Unlock-Token", out var values) ? values.FirstOrDefault() : null;
 }

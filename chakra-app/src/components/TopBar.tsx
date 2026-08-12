@@ -1,8 +1,8 @@
-import { Box, Button, HStack, IconButton, Menu, Popover, Portal, Text } from "@chakra-ui/react"
+import { Box, Button, HStack, IconButton, Menu, Popover, Portal, Spinner, Text } from "@chakra-ui/react"
 import { useEffect, useRef, useState } from "react"
 import { SearchInput } from "./SearchInput"
 import { TagFilterModal } from "./TagFilterModal"
-import { copyToClipboard } from "../services/clipboard"
+import { CopyButton } from "./CopyButton"
 import type { CustomToaster } from "./CustomToast"
 
 export type SortMode = "newest" | "name" | "random"
@@ -92,46 +92,6 @@ function MoreIcon() {
     )
 }
 
-function CopyButton({ value }: { value: string }) {
-    const [copied, setCopied] = useState(false)
-
-    const handleCopy = async (e: React.MouseEvent) => {
-        e.stopPropagation()
-        const ok = await copyToClipboard(value)
-        if (ok) {
-            setCopied(true)
-            setTimeout(() => setCopied(false), 1500)
-        }
-    }
-
-    return (
-        <Button
-            size="2xs"
-            variant="ghost"
-            colorPalette="gray"
-            flexShrink="0"
-            onClick={handleCopy}
-            aria-label="Copy to clipboard"
-            minW="unset"
-            px="1"
-            fontSize="10px"
-            fontWeight="normal"
-            color={copied ? "green.500" : undefined}
-        >
-            {copied ? (
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="20 6 9 17 4 12" />
-                </svg>
-            ) : (
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                </svg>
-            )}
-        </Button>
-    )
-}
-
 export function TopBar({
     searchQuery,
     onSearchChange,
@@ -210,7 +170,7 @@ export function TopBar({
                 py="2.5"
                 gap="2"
             >
-                {/* Mobile: Show All button (home moved to More menu) */}
+                {/* Mobile: Show All button (resets folder to all assets) */}
                 <IconButton
                     variant="ghost"
                     size="sm"
@@ -226,7 +186,7 @@ export function TopBar({
                     </svg>
                 </IconButton>
 
-                {/* Desktop: Home button */}
+                {/* Home button (desktop) */}
                 <IconButton
                     variant="ghost"
                     size="sm"
@@ -296,7 +256,7 @@ export function TopBar({
                                             >
                                                 {libraryPath}
                                             </Text>
-                                            <CopyButton value={libraryPath} />
+                                            <CopyButton text={libraryPath} size="2xs" colorPalette="gray" stopPropagation />
                                         </HStack>
                                     )}
                                     {libraryId && (
@@ -320,7 +280,7 @@ export function TopBar({
                                             >
                                                 {libraryId}
                                             </Text>
-                                            <CopyButton value={libraryId} />
+                                            <CopyButton text={libraryId} size="2xs" colorPalette="gray" stopPropagation />
                                         </HStack>
                                     )}
                                 </Popover.Content>
@@ -403,19 +363,6 @@ export function TopBar({
 
                 {/* Action buttons */}
                 <HStack gap="1" marginLeft="auto" flexShrink="0">
-                    {/* Desktop: Rescan */}
-                    <IconButton
-                        variant="ghost"
-                        size="sm"
-                        aria-label="Rescan library"
-                        loading={scanning}
-                        onClick={onRescan}
-                        title="Rescan library for external changes"
-                        display={{ base: "none", md: "inline-flex" }}
-                    >
-                        <RefreshIcon />
-                    </IconButton>
-
                     {/* Desktop: Sort */}
                     <Menu.Root>
                         <Menu.Trigger asChild>
@@ -503,6 +450,11 @@ export function TopBar({
                                     </Menu.Item>
 
                                     {/* ── Actions ── */}
+                                    <Menu.Item value="rescan" onClick={onRescan} py="2.5" disabled={scanning}>
+                                        <RefreshIcon />
+                                        <Box as="span" ml="2" flex="1">Rescan Library</Box>
+                                        {scanning && <Spinner size="xs" />}
+                                    </Menu.Item>
                                     <Menu.Item value="sort" py="2.5" display={{ md: "none" }} closeOnSelect={false}>
                                         <SortIcon />
                                         <Box as="span" ml="2" flex="1">Sort</Box>

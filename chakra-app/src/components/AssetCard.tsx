@@ -23,11 +23,10 @@ function BrokenImageIcon() {
 
 function DragHandleIcon() {
     return (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="8" cy="8" r="1.5" />
-            <circle cx="16" cy="8" r="1.5" />
-            <circle cx="8" cy="16" r="1.5" />
-            <circle cx="16" cy="16" r="1.5" />
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="4" y1="6.5" x2="20" y2="6.5" />
+            <line x1="4" y1="12" x2="20" y2="12" />
+            <line x1="4" y1="17.5" x2="20" y2="17.5" />
         </svg>
     )
 }
@@ -109,25 +108,26 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, rem
                 )}
             </Box>
 
-            {/* Drag handle — top-right, visible on hover */}
+            {/* Drag handle — top-left corner, blends into the card edge, visible on hover */}
             {!isRemoved && (
                 <Box
                     position="absolute"
-                    top="1.5"
-                    right="1.5"
-                    width="24px"
-                    height="24px"
-                    borderRadius="sm"
+                    top="0"
+                    left="0"
+                    width="30px"
+                    height="30px"
+                    borderBottomRightRadius="xl"
                     display={hovered ? "flex" : "none"}
                     alignItems="center"
                     justifyContent="center"
-                    bg="black/45"
+                    bg="black/50"
+                    boxShadow="md"
                     color="white"
                     cursor="grab"
                     draggable
                     opacity={hovered ? 1 : 0}
-                    transition="opacity 0.15s"
-                    _active={{ cursor: "grabbing", bg: "black/65" }}
+                    transition="opacity 1.0s"
+                    _active={{ cursor: "grabbing", bg: "black/60" }}
                     onDragStart={onDragStart}
                     onDragEnd={onDragEnd}
                     onClick={(e) => e.stopPropagation()}
