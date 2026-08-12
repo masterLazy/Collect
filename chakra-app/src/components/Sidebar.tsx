@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { useNavigate, useParams } from "react-router-dom"
+import { useParams } from "react-router-dom"
 import type { CustomToaster } from "./CustomToast"
 import {
     Badge,
@@ -16,6 +16,7 @@ import {
     Text,
 } from "@chakra-ui/react"
 import { api, API_BASE } from "../services/api"
+import { formatSize, formatDate, getClosestAspectRatio } from "../lib/assetMeta"
 import { CopyButton } from "./CopyButton"
 import { PaletteBar } from "./PaletteBar"
 import { TagEditor } from "./TagEditor"
@@ -69,59 +70,8 @@ function TrashIcon() {
     )
 }
 
-function formatSize(bytes: number): string {
-    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB"
-    if (bytes >= 1024) return (bytes / 1024).toFixed(0) + " KB"
-    return bytes + " B"
-}
-
-function formatDate(iso: string): string {
-    try {
-        return new Date(iso).toLocaleDateString(undefined, {
-            year: "numeric",
-            month: "short",
-            day: "numeric",
-        })
-    } catch {
-        return iso
-    }
-}
-
-const aspectRatioEntries: { ratio: number; text: string; label?: string }[] = [
-    { ratio: 1, text: "1 : 1", label: "Square" },
-    { ratio: 4 / 3, text: "4 : 3" },
-    { ratio: 3 / 2, text: "3 : 2" },
-    { ratio: 16 / 9, text: "16 : 9" },
-    { ratio: 21 / 9, text: "21 : 9" },
-    { ratio: 1.618, text: "1.618 : 1", label: "Golden Ratio" },
-    { ratio: 1.414, text: "1.414 : 1", label: "Silver Ratio" },
-    { ratio: 3 / 4, text: "3 : 4" },
-    { ratio: 2 / 3, text: "2 : 3" },
-    { ratio: 9 / 16, text: "9 : 16" },
-    { ratio: 16 / 10, text: "16 : 10" },
-    { ratio: 5 / 4, text: "5 : 4" },
-]
-
-function getClosestAspectRatio(w: number, h: number): { text: string; label?: string; percent: number } | null {
-    if (!w || !h) return null
-    // Always use long side / short side, so ratio >= 1
-    const raw = Math.max(w, h) / Math.min(w, h)
-    let best = aspectRatioEntries[0]
-    let minDiff = Math.abs(raw - best.ratio)
-    for (let i = 1; i < aspectRatioEntries.length; i++) {
-        const diff = Math.abs(raw - aspectRatioEntries[i].ratio)
-        if (diff < minDiff) {
-            minDiff = diff
-            best = aspectRatioEntries[i]
-        }
-    }
-    const percent = Math.min(100, Math.max(0, Math.round((1 - minDiff / best.ratio) * 100 * 10) / 10))
-    return { text: best.text, label: best.label, percent }
-}
-
 export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, onTagsSaved, onRefreshRequested }: SidebarProps) {
     const { libraryId } = useParams()
-    const navigate = useNavigate()
     const [asset, setAsset] = useState<AssetDetailDto | null>(null)
     const [loading, setLoading] = useState(false)
     const [imageLoaded, setImageLoaded] = useState(false)
@@ -192,7 +142,10 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const handleOpenFullscreen = () => {
         if (!assetId || !libraryId) return
         const shortId = libraryId.length > 8 ? libraryId.slice(0, 8) : libraryId
-        navigate(`/${shortId}/view/${assetId}`)
+        // Open in a new tab/window so the library stays intact behind the viewer.
+        // No noopener: same-origin, and the viewer needs window.opener set so its
+        // close button can window.close() the popup it was opened in.
+        window.open(`/${shortId}/view/${assetId}`, "_blank")
     }
 
     const checkOverflow = useCallback(() => {
@@ -224,18 +177,44 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
 
     const handleCopyImage = async () => {
         if (!asset || !assetId) return
+
+        // Non-secure context (plain HTTP) — the Clipboard API is not exposed, so programmatic
+        // copying is impossible. Skip the request entirely and guide the user to the browser's
+        // own context menu, which still offers "Copy image" on the preview <img>.
+        if (typeof navigator.clipboard === "undefined" || typeof ClipboardItem === "undefined") {
+            toaster.create({
+                title: "Copy via browser menu",
+                type: "info",
+                description: "Clipboard isn't available over HTTP. Right-click the image and select \"Copy image\".",
+            })
+            return
+        }
+
         setCopiedImage(true)
         setTimeout(() => setCopiedImage(false), 2000)
         try {
             const response = await fetch(API_BASE + "/api/assets/" + assetId + "/clipboard-image?libraryId=" + encodeURIComponent(libraryId!))
+            if (!response.ok) {
+                if (response.status === 403) {
+                    throw new Error("Library is locked. Unlock it and try again.")
+                }
+                if (response.status === 404) {
+                    throw new Error("Image file not found on disk.")
+                }
+                throw new Error("Server error (" + response.status + ").")
+            }
             const blob = await response.blob()
             await navigator.clipboard.write([
                 new ClipboardItem({ "image/png": blob }),
             ])
             toaster.create({ title: "Image copied", type: "success" })
-        } catch {
+        } catch (err) {
             setCopiedImage(false)
-            toaster.create({ title: "Failed to copy image", type: "error" })
+            toaster.create({
+                title: "Failed to copy image",
+                type: "error",
+                description: err instanceof Error ? err.message : undefined,
+            })
         }
     }
 
