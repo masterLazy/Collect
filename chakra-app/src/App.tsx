@@ -105,7 +105,8 @@ function HomePage() {
     <>
       <LibraryManager toaster={toaster as CustomToaster} onLibraryReady={(libraryId) => {
         if (libraryId) {
-          navigate(`/${libraryId.slice(0, 8)}`, { replace: true })
+          // Push (not replace) so browser Back from the library returns to the manager
+          navigate(`/${libraryId.slice(0, 8)}`)
         } else {
           navigate("/", { replace: true })
         }

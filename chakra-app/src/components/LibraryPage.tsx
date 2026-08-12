@@ -76,6 +76,7 @@ export function LibraryPage() {
     const [searchQuery, setSearchQuery] = useState(searchFromUrl)
     const [selectedTags, setSelectedTags] = useState<string[]>([])
     const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null)
+    const [scrollTargetId, setScrollTargetId] = useState<string | null>(null)
     const [currentFolder, setCurrentFolder] = useState(folderFromUrl)
     const [addDialogOpen, setAddDialogOpen] = useState(false)
     const [mobileTreeOpen, setMobileTreeOpen] = useState(false)
@@ -170,6 +171,13 @@ export function LibraryPage() {
                 setSelectedTags(parsedTags)
             }
 
+            // Deep-link: a #<asset_id> hash opens the sidebar and scrolls the grid to it
+            const hashId = location.hash.replace(/^#/, "")
+            if (hashId) {
+                setSelectedAssetId(hashId)
+                setScrollTargetId(hashId)
+            }
+
             loadAssets(1, searchFromUrl, false, toApiFolder(folderFromUrl), getSubfolders(folderFromUrl))
                 .then(() => {
                     // Check for tag conflicts after initial load
@@ -185,6 +193,13 @@ export function LibraryPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [libraryLoading])
 
+    // Sync the URL hash to the selected asset — handles browser back/forward
+    // and manual URL edits (hash removal closes the sidebar, and vice versa).
+    useEffect(() => {
+        const hashId = location.hash.replace(/^#/, "")
+        setSelectedAssetId(hashId || null)
+    }, [location.hash])
+
     // Mobile detection
     useEffect(() => {
         const mq = window.matchMedia("(max-width: 767px)")
@@ -194,8 +209,9 @@ export function LibraryPage() {
         return () => mq.removeEventListener("change", handler)
     }, [])
 
-    // Update URL when folder or search changes (skip the initial sync)
-    const updateUrl = useCallback((folder: string, query: string, sort?: string) => {
+    // Build the library URL for folder/search/sort, optionally appending an asset
+    // hash. Folder/search/sort changes intentionally drop any hash.
+    const buildUrl = useCallback((folder: string, query: string, sort?: string, hash?: string) => {
         let base: string
         if (folder === "") {
             base = `/${libraryId}` // All
@@ -210,8 +226,13 @@ export function LibraryPage() {
         if (resolvedSort !== "newest") params.set("sort", resolvedSort)
         if (alwaysShowSearch) params.set("ss", "1")
         const searchStr = params.toString()
-        navigate(`${base}${searchStr ? `?${searchStr}` : ""}`, { replace: true })
-    }, [libraryId, navigate, alwaysShowSearch, sortMode])
+        return `${base}${searchStr ? `?${searchStr}` : ""}${hash ? `#${hash}` : ""}`
+    }, [libraryId, alwaysShowSearch, sortMode])
+
+    // Update URL when folder or search changes (skip the initial sync)
+    const updateUrl = useCallback((folder: string, query: string, sort?: string) => {
+        navigate(buildUrl(folder, query, sort), { replace: true })
+    }, [navigate, buildUrl])
 
     const loadAssets = useCallback(async (pageNum: number, query: string, append: boolean, folder?: string, subfolders?: boolean, sort?: string) => {
         setLoading(true)
@@ -462,13 +483,35 @@ export function LibraryPage() {
 
     const handleSelectAsset = useCallback((id: string) => {
         setSelectedAssetId(id)
-    }, [])
+        // A manual selection must never trigger an unrelated deep-link scroll
+        setScrollTargetId(null)
+        navigate(buildUrl(currentFolder, searchQuery, sortMode, id), { replace: true })
+    }, [currentFolder, searchQuery, sortMode, buildUrl, navigate])
+
+    const handleCloseSidebar = useCallback(() => {
+        setSelectedAssetId(null)
+        navigate(buildUrl(currentFolder, searchQuery, sortMode), { replace: true })
+    }, [currentFolder, searchQuery, sortMode, buildUrl, navigate])
 
     const handleSwitchLibrary = useCallback(() => {
         navigate("/", { state: { forceHome: true } })
     }, [navigate])
 
     const hasMore = assets.length < total
+
+    // Page toward a deep-link scroll target until it appears in the grid.
+    // While loading we cannot conclude anything (total is not final); once
+    // loaded, either keep paging (hasMore) or give up (asset not in directory).
+    useEffect(() => {
+        if (!scrollTargetId) return
+        if (assets.some((a) => a.id === scrollTargetId)) return // MasonryGrid will scroll
+        if (loading) return
+        if (hasMore) {
+            handleLoadMore()
+        } else {
+            setScrollTargetId(null)
+        }
+    }, [scrollTargetId, assets, hasMore, loading, handleLoadMore])
 
     // Loading state
     if (libraryLoading) {
@@ -593,11 +636,13 @@ export function LibraryPage() {
                         currentFolder={currentFolder}
                         searchQuery={searchQuery}
                         removedAssetIds={removedAssetMap}
+                        scrollToAssetId={scrollTargetId}
+                        onScrollTargetHandled={() => setScrollTargetId(null)}
                     />
                 </Box>
 
                 {/* Right: Docked Sidebar (desktop only) */}
-                {selectedAssetId && <SidebarPanel assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />}
+                {selectedAssetId && <SidebarPanel assetId={selectedAssetId} onClose={handleCloseSidebar} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />}
             </Box>
 
             <AddAssetDialog
@@ -646,7 +691,7 @@ export function LibraryPage() {
             </Drawer.Root>
 
             {/* Mobile bottom sheet for sidebar */}
-            <Drawer.Root placement="bottom" open={!!selectedAssetId && isMobile} onOpenChange={(e: { open: boolean }) => { if (!e.open) setSelectedAssetId(null) }}>
+            <Drawer.Root placement="bottom" open={!!selectedAssetId && isMobile} onOpenChange={(e: { open: boolean }) => { if (!e.open) handleCloseSidebar() }}>
                 <Portal>
                     <Drawer.Backdrop />
                     <Drawer.Positioner>
@@ -663,7 +708,7 @@ export function LibraryPage() {
                                 </HStack>
                             </Drawer.Header>
                             <Drawer.Body p="4">
-                                <Sidebar assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />
+                                <Sidebar assetId={selectedAssetId} onClose={handleCloseSidebar} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />
                             </Drawer.Body>
                         </Drawer.Content>
                     </Drawer.Positioner>
