@@ -1427,55 +1427,65 @@ public partial class AssetService : IAssetService
         {
             var encryptionKey = _libraryService.GetEncryptionKey();
 
-            // Decrypt the file if the library is encrypted
-            SKCodec codec;
+            // Decrypt the file if the library is encrypted.
+            // IMPORTANT: the stream must stay open for the whole decode — SKCodec created from
+            // a stream reads from it lazily, so disposing the stream before decoding throws
+            // ObjectDisposedException (which used to surface as a silent 404 "not found").
             if (encryptionKey is not null)
             {
                 var decrypted = _encryptionService.ReadAndDecryptFile(filePath, encryptionKey);
                 using var decryptedStream = new MemoryStream(decrypted);
-                codec = SKCodec.Create(decryptedStream);
-            }
-            else
-            {
-                using var input = File.OpenRead(filePath);
-                codec = SKCodec.Create(input);
+                return EncodeClipboardPng(decryptedStream);
             }
 
-            if (codec is null) return null;
-
-            var info = codec.Info;
-            var maxDim = Math.Max(info.Width, info.Height);
-
-            using var original = SKBitmap.Decode(codec);
-            if (original is null) return null;
-
-            SKBitmap? finalBitmap;
-            if (maxDim > 2000)
-            {
-                float scale = 2000f / maxDim;
-                int newWidth = Math.Max(1, (int)(info.Width * scale));
-                int newHeight = Math.Max(1, (int)(info.Height * scale));
-                finalBitmap = original.Resize(new SKSizeI(newWidth, newHeight), new SKSamplingOptions(SKFilterMode.Linear));
-                if (finalBitmap is null) return null;
-            }
-            else
-            {
-                finalBitmap = original;
-            }
-
-            using var image = SKImage.FromBitmap(finalBitmap);
-            using var data = image.Encode(SKEncodedImageFormat.Png, 100);
-            var bytes = data.ToArray();
-
-            if (finalBitmap != original)
-                finalBitmap.Dispose();
-
-            return bytes;
+            using var input = File.OpenRead(filePath);
+            return EncodeClipboardPng(input);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Clipboard image failed for asset {Id} at {Path}", id, filePath);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Decode an image stream and re-encode it as PNG (max 2000px on the longest side) for
+    /// clipboard copying. The caller must keep <paramref name="stream"/> open for the duration
+    /// of this call, because <see cref="SKCodec"/> reads from the stream lazily.
+    /// </summary>
+    private static byte[]? EncodeClipboardPng(Stream stream)
+    {
+        using var codec = SKCodec.Create(stream);
+        if (codec is null) return null;
+
+        var info = codec.Info;
+        var maxDim = Math.Max(info.Width, info.Height);
+
+        using var original = SKBitmap.Decode(codec);
+        if (original is null) return null;
+
+        SKBitmap? finalBitmap;
+        if (maxDim > 2000)
+        {
+            float scale = 2000f / maxDim;
+            int newWidth = Math.Max(1, (int)(info.Width * scale));
+            int newHeight = Math.Max(1, (int)(info.Height * scale));
+            finalBitmap = original.Resize(new SKSizeI(newWidth, newHeight), new SKSamplingOptions(SKFilterMode.Linear));
+            if (finalBitmap is null) return null;
+        }
+        else
+        {
+            finalBitmap = original;
+        }
+
+        using var image = SKImage.FromBitmap(finalBitmap);
+        using var data = image.Encode(SKEncodedImageFormat.Png, 100);
+        var bytes = data.ToArray();
+
+        if (finalBitmap != original)
+            finalBitmap.Dispose();
+
+        return bytes;
     }
 
     public async Task<string?> GetThumbnailPathAsync(string id)
