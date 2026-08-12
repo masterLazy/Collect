@@ -8,7 +8,7 @@ description: >
   decompose scope, delegate to subagents, and verify rather than write code
   directly; or assembling/reviewing progress from multiple team agents.
 name: "Tech Lead"
-tools: [vscode, execute, read, agent, search, edit, todo]
+tools: [vscode, execute, read, agent, edit, search, web, browser, 'ollama-vision/*', todo]
 agents: [".NET Backend Builder", "Chakra UI Builder", "WPF Fluent UI Builder"]
 argument-hint: "Describe the feature or requirement to plan, decompose, delegate across backend/frontend/WPF builders, and verify."
 user-invocable: true
