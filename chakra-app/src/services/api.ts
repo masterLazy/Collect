@@ -144,7 +144,14 @@ export const api = {
         post<{ path: string }>(`/api/library/rename-directory?libraryId=${encodeURIComponent(libraryId)}`, { relativePath, newName }),
     deleteDirectory: (libraryId: string, relativePath: string) =>
         post<{ success: boolean }>(`/api/library/delete-directory?libraryId=${encodeURIComponent(libraryId)}`, { relativePath }),
-    uploadAssets: async (libraryId: string, files: File[], targetDir: string, keepFilename?: boolean, tags?: AssetTag[]) => {
+    uploadAssets: (
+        libraryId: string,
+        files: File[],
+        targetDir: string,
+        keepFilename?: boolean,
+        tags?: AssetTag[],
+        onProgress?: (loaded: number, total: number) => void,
+    ) => {
         const formData = new FormData()
         files.forEach((f) => formData.append("files", f))
         formData.append("targetDir", targetDir)
@@ -156,13 +163,47 @@ export const api = {
             formData.append("tags", JSON.stringify(normalizedTags))
             formData.append("tagsJson", JSON.stringify(normalizedTags))
         }
-        const res = await fetch(API_BASE + `/api/assets/upload?libraryId=${encodeURIComponent(libraryId)}`, {
-            method: "POST",
-            headers: buildHeaders(),
-            body: formData,
+
+        // XHR instead of fetch so upload progress can be reported for large batches.
+        return new Promise<UploadResult>((resolve, reject) => {
+            const xhr = new XMLHttpRequest()
+            xhr.open("POST", `${API_BASE}/api/assets/upload?libraryId=${encodeURIComponent(libraryId)}`)
+            // Content-Type is intentionally not set — the browser adds the multipart boundary.
+            const token = getToken()
+            if (token) xhr.setRequestHeader("X-Unlock-Token", token)
+
+            if (onProgress) {
+                xhr.upload.onprogress = (event) => {
+                    if (event.lengthComputable) onProgress(event.loaded, event.total)
+                }
+            }
+
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    try {
+                        resolve(JSON.parse(xhr.responseText) as UploadResult)
+                    } catch {
+                        reject(new ApiError("Upload succeeded but the response could not be read.", xhr.status))
+                    }
+                    return
+                }
+
+                let errorMsg = `API Error: ${xhr.status} ${xhr.statusText}`
+                try {
+                    const errorBody = JSON.parse(xhr.responseText)
+                    if (errorBody.error) {
+                        errorMsg = `${xhr.status} - ${errorBody.error}`
+                    } else if (errorBody.detail) {
+                        errorMsg = `${xhr.status} - ${errorBody.detail}`
+                    }
+                } catch { /* ignore parsing errors */ }
+                reject(new ApiError(errorMsg, xhr.status))
+            }
+
+            xhr.onerror = () => reject(new ApiError("Network error while uploading.", 0))
+            xhr.onabort = () => reject(new ApiError("Upload cancelled.", 0))
+            xhr.send(formData)
         })
-        if (!res.ok) throw new Error("Upload failed")
-        return res.json() as Promise<UploadResult>
     },
     getAssets: (libraryId: string, page: number, size: number, folder?: string, subfolders?: boolean, sort?: string) => {
         let url = `/api/assets?libraryId=${encodeURIComponent(libraryId)}&page=${page}&size=${size}`

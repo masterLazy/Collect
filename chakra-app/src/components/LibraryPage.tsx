@@ -25,6 +25,7 @@ import { AddAssetDialog } from "./AddAssetDialog"
 import { TagConflictDialog } from "./TagConflictDialog"
 import { useCustomToaster, ToastContainer, CustomToaster } from "./CustomToast"
 import { api, ApiError } from "../services/api"
+import { imageFilesFromDataTransfer } from "../lib/clipboardFiles"
 import type { AssetDto, TagConflict } from "../types"
 
 const PAGE_SIZE = 30
@@ -79,6 +80,7 @@ export function LibraryPage() {
     const [scrollTargetId, setScrollTargetId] = useState<string | null>(null)
     const [currentFolder, setCurrentFolder] = useState(folderFromUrl)
     const [addDialogOpen, setAddDialogOpen] = useState(false)
+    const [pendingFiles, setPendingFiles] = useState<File[]>([])
     const [mobileTreeOpen, setMobileTreeOpen] = useState(false)
     const [scanning, setScanning] = useState(false)
     const [tagConflicts, setTagConflicts] = useState<TagConflict[]>([])
@@ -208,6 +210,35 @@ export function LibraryPage() {
         mq.addEventListener("change", handler)
         return () => mq.removeEventListener("change", handler)
     }, [])
+
+    // Paste-to-add: an image pasted anywhere on the gallery is handed to the Add
+    // Assets dialog (target folder = the folder being browsed). Text pastes are
+    // left untouched, and other open overlays keep ownership of the clipboard.
+    useEffect(() => {
+        const handlePaste = (event: ClipboardEvent) => {
+            const pasted = imageFilesFromDataTransfer(event.clipboardData)
+            if (pasted.length === 0) return
+
+            // The Add Assets dialog is a portal as well, so only gate on *other*
+            // overlays (tag browser, unlock prompts, ...).
+            const otherOverlayOpen = !!document.querySelector(
+                "[data-scope='dialog'][data-part='content'], [data-scope='drawer'][data-part='content']"
+            )
+            if (!addDialogOpen && otherOverlayOpen) return
+
+            event.preventDefault()
+            setPendingFiles(pasted)
+            setAddDialogOpen(true)
+            toaster.create({
+                title: pasted.length === 1 ? "Image pasted" : pasted.length + " images pasted",
+                description: "Review and upload from the Add Assets dialog.",
+                type: "info",
+            })
+        }
+
+        document.addEventListener("paste", handlePaste)
+        return () => document.removeEventListener("paste", handlePaste)
+    }, [addDialogOpen, toaster])
 
     // Build the library URL for folder/search/sort, optionally appending an asset
     // hash. Folder/search/sort changes intentionally drop any hash.
@@ -653,6 +684,8 @@ export function LibraryPage() {
                 onAssetsAdded={() => { setPage(1); setAssets([]); setTreeRefreshKey((k) => k + 1); loadAssets(1, searchQuery, false, currentFolder || undefined, getSubfolders(currentFolder)) }}
                 currentFolder={currentFolder}
                 libraryId={libraryId}
+                initialFiles={pendingFiles}
+                onInitialFilesConsumed={() => setPendingFiles([])}
             />
 
             {/* Mobile directory drawer (bottom) */}
