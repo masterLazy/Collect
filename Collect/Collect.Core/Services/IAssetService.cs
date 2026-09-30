@@ -18,7 +18,7 @@ public interface IAssetService
     /// When subfolders is false and folder is specified, only returns assets directly in that folder (not subdirectories).
     /// When folder is "__root__", returns assets in the library root that are not in any subdirectory.
     /// </summary>
-    Task<PaginatedResponse<AssetDto>> GetAssetsAsync(int page, int pageSize, string sort, string? folder = null, bool subfolders = true);
+    Task<PaginatedResponse<AssetDto>> GetAssetsAsync(int page, int pageSize, string sort, string? folder = null, bool subfolders = true, int? seed = null);
 
     /// <summary>
     /// Get all assets in the in-memory store (auto-scans if empty).
@@ -72,6 +72,23 @@ public interface IAssetService
     /// Returns the updated AssetDetailDto, or null if the asset was not found.
     /// </summary>
     Task<AssetDetailDto?> MoveAssetAsync(string id, string targetFolder);
+
+    /// <summary>
+    /// Boost (up-vote) an asset. Each asset can be boosted once per local day;
+    /// returns null when the asset does not exist.
+    /// </summary>
+    Task<BoostResultDto?> BoostAssetAsync(string id);
+
+    /// <summary>
+    /// Take back today's boost (count −1, daily limit cleared) so the asset can be
+    /// boosted again today. A no-op when it was not boosted today.
+    /// </summary>
+    Task<BoostResultDto?> UndoBoostAsync(string id);
+
+    /// <summary>
+    /// Clear every boost for an asset. A no-op when the asset has no boosts.
+    /// </summary>
+    Task<BoostResultDto?> ResetBoostCountAsync(string id);
 
     /// <summary>
     /// Delete an asset: remove from in-memory list and delete the file from disk.

@@ -103,6 +103,12 @@ public interface ILibraryService
     Task SetCategoryOrderAsync(List<string> order);
 
     /// <summary>
+    /// Persist the library's view preferences. Null arguments leave the stored
+    /// value unchanged.
+    /// </summary>
+    Task SetPreferencesAsync(string? viewMode, string? sortMode);
+
+    /// <summary>
     /// Get all registered libraries from the persistent registry.
     /// </summary>
     Task<List<LibraryInfo>> GetLibrariesAsync();

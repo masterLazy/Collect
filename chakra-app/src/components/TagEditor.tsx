@@ -15,6 +15,8 @@ interface TagEditorProps {
     onTagsSaved?: (updatedAsset: AssetDetailDto) => void
     libraryId: string
     toaster?: CustomToaster
+    /** Hide the built-in "Tags" title when the parent already renders a section header. */
+    hideLabel?: boolean
 }
 
 function CheckIcon() {
@@ -59,7 +61,7 @@ function EditIcon() {
     )
 }
 
-export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTags = [], onTagsSaved, libraryId, toaster }: TagEditorProps) {
+export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTags = [], onTagsSaved, libraryId, toaster, hideLabel }: TagEditorProps) {
     const [initialTags, setInitialTags] = useState<AssetTag[]>([])
     const [inputValue, setInputValue] = useState("")
     const [suggestions, setSuggestions] = useState<string[]>([])
@@ -313,80 +315,59 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
         }).catch(() => { })
     }, [libraryId])
 
+    // Tag actions normally live in the header row. When the parent renders its
+    // own section header (hideLabel), they move inline to the end of the chip
+    // row instead of floating on a nearly empty line of their own.
+    const dirtyMarker = (
+        <Text color="red.400" fontWeight="bold" fontSize="sm" lineHeight="1" visibility={hasChanges ? "visible" : "hidden"}>*</Text>
+    )
+    const copyTagsButton = tags.length > 0 ? <CopyButton text={getTagString()} /> : null
+    const editTagsButton = !deleteMode && !hasChanges && tags.length > 0 ? (
+        <Box
+            as="button"
+            onClick={() => setDeleteMode(true)}
+            display="inline-flex"
+            alignItems="center"
+            justifyContent="center"
+            width="6"
+            height="6"
+            borderRadius="md"
+            color="fg.subtle"
+            opacity={0.6}
+            _hover={{ opacity: 1, bg: "bg.subtle", cursor: "pointer" }}
+            transition="opacity 0.1s ease"
+            aria-label="Edit tags"
+        >
+            <EditIcon />
+        </Box>
+    ) : null
+    const saveControls = onTagsSaved && (deleteMode || hasChanges) ? (
+        <HStack gap="1" flexShrink="0">
+            {/* Reset — only when there are pending changes */}
+            {hasChanges && (
+                <Button size="xs" variant="ghost" colorPalette="red" onClick={handleUndo} px="1.5">
+                    <UndoIcon />
+                </Button>
+            )}
+            <Button size="xs" variant="ghost" colorPalette="accent" loading={saving} onClick={handleSave} px="1.5">
+                <CheckIcon />
+            </Button>
+        </HStack>
+    ) : null
+
     return (
         <Stack gap="3" position="relative">
-            <HStack gap="1" justify="space-between">
-                <HStack gap="1">
-                    <Text fontWeight="semibold" fontSize="sm" color="fg">Tags</Text>
-                    <Text
-                        color="red.400"
-                        fontWeight="bold"
-                        fontSize="sm"
-                        lineHeight="1"
-                        visibility={hasChanges ? "visible" : "hidden"}
-                    >*</Text>
-                    {/* Copy — always visible when there are tags */}
-                    {tags.length > 0 && (
-                        <CopyButton text={getTagString()} />
-                    )}
-                    {/* Pen — shown when not in edit mode */}
-                    {!deleteMode && !hasChanges && tags.length > 0 && (
-                        <Box
-                            as="button"
-                            onClick={() => setDeleteMode(true)}
-                            display="inline-flex"
-                            alignItems="center"
-                            justifyContent="center"
-                            width="6"
-                            height="6"
-                            borderRadius="md"
-                            color="fg.subtle"
-                            opacity={0.5}
-                            _hover={{ opacity: 1, bg: "bg.subtle", cursor: "pointer" }}
-                            transition="opacity 0.1s ease"
-                            aria-label="Edit tags"
-                        >
-                            <EditIcon />
-                        </Box>
-                    )}
-                </HStack>
-                {onTagsSaved && (
-                    <HStack gap="1" flexShrink="0">
-                        {/* Reset — always rendered, visible only when there are pending changes */}
-                        <Box
-                            visibility={hasChanges ? "visible" : "hidden"}
-                            display="inline-flex"
-                        >
-                            <Button
-                                size="xs"
-                                variant="ghost"
-                                colorPalette="red"
-                                onClick={handleUndo}
-                                px="1.5"
-                            >
-                                <UndoIcon />
-                            </Button>
-                        </Box>
-                        {/* Check — always rendered, visible when in edit mode or there are pending changes */}
-                        <Box
-                            visibility={(deleteMode || hasChanges) ? "visible" : "hidden"}
-                            display="inline-flex"
-                        >
-                            <Button
-                                size="xs"
-                                variant="ghost"
-                                colorPalette="accent"
-                                loading={saving}
-                                onClick={handleSave}
-                                px="1.5"
-                            >
-                                <CheckIcon />
-                            </Button>
-                        </Box>
-
+            {!hideLabel && (
+                <HStack gap="1" justify="space-between">
+                    <HStack gap="1">
+                        <Text fontWeight="semibold" fontSize="sm" color="fg">Tags</Text>
+                        {dirtyMarker}
+                        {copyTagsButton}
+                        {editTagsButton}
                     </HStack>
-                )}
-            </HStack>
+                    {saveControls}
+                </HStack>
+            )}
 
             <HStack gap="2" flexWrap="wrap">
                 {[...tags].sort((a, b) => {
@@ -445,6 +426,15 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
                     )
                 })}
 
+                {/* Inline actions when the parent supplies the section header */}
+                {hideLabel && (
+                    <HStack gap="1" align="center">
+                        {dirtyMarker}
+                        {copyTagsButton}
+                        {editTagsButton}
+                        {saveControls}
+                    </HStack>
+                )}
             </HStack>
 
             <Field.Root>

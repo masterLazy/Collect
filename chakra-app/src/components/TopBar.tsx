@@ -5,7 +5,7 @@ import { TagFilterModal } from "./TagFilterModal"
 import { CopyButton } from "./CopyButton"
 import type { CustomToaster } from "./CustomToast"
 
-export type SortMode = "newest" | "name" | "random"
+export type SortMode = "newest" | "name" | "random" | "boosts"
 
 interface TopBarProps {
     searchQuery: string
@@ -35,6 +35,9 @@ interface TopBarProps {
     onLock?: () => void
     sortMode?: SortMode
     onSortChange?: (mode: SortMode) => void
+    /** Gallery layout: natural aspect ratios (masonry) or uniform squares (grid). */
+    viewMode?: "masonry" | "grid"
+    onViewModeChange?: (mode: "masonry" | "grid") => void
     toaster: CustomToaster
 }
 
@@ -69,6 +72,28 @@ function RefreshIcon() {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="23 4 23 10 17 10" />
             <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+        </svg>
+    )
+}
+
+function MasonryIcon() {
+    return (
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="8" height="11" rx="1" />
+            <rect x="13" y="3" width="8" height="7" rx="1" />
+            <rect x="3" y="16" width="8" height="5" rx="1" />
+            <rect x="13" y="12" width="8" height="9" rx="1" />
+        </svg>
+    )
+}
+
+function GridIcon() {
+    return (
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1" />
+            <rect x="14" y="3" width="7" height="7" rx="1" />
+            <rect x="3" y="14" width="7" height="7" rx="1" />
+            <rect x="14" y="14" width="7" height="7" rx="1" />
         </svg>
     )
 }
@@ -120,6 +145,8 @@ export function TopBar({
     onLock,
     sortMode = "newest",
     onSortChange,
+    viewMode = "masonry",
+    onViewModeChange,
     toaster,
 }: TopBarProps) {
     // Mobile search bar visibility:
@@ -152,7 +179,10 @@ export function TopBar({
         newest: "Latest",
         name: "Filename",
         random: "Random",
+        boosts: "Most boosted",
     }
+
+    const sortModes = ["newest", "name", "random", "boosts"] as const
 
     return (
         <Box
@@ -170,199 +200,215 @@ export function TopBar({
                 py="2.5"
                 gap="2"
             >
-                {/* Mobile: Show All button (resets folder to all assets) */}
-                <IconButton
-                    variant="ghost"
-                    size="sm"
-                    aria-label="Show all assets"
-                    onClick={onShowAll}
-                    display={{ base: "inline-flex", md: "none" }}
-                >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <rect x="3" y="3" width="7" height="7" rx="1" />
-                        <rect x="14" y="3" width="7" height="7" rx="1" />
-                        <rect x="3" y="14" width="7" height="7" rx="1" />
-                        <rect x="14" y="14" width="7" height="7" rx="1" />
-                    </svg>
-                </IconButton>
-
-                {/* Home button (desktop) */}
-                <IconButton
-                    variant="ghost"
-                    size="sm"
-                    aria-label="Switch library"
-                    onClick={onSwitchLibrary}
-                    display={{ base: "none", md: "inline-flex" }}
-                >
-                    <HomeIcon />
-                </IconButton>
-
-                {libraryName && (
-                    <Popover.Root positioning={{ placement: "bottom-start" }}>
-                        <Popover.Trigger>
-                            <Text
-                                fontSize="sm"
-                                fontWeight="medium"
-                                color="fg"
-                                maxW={{ base: "120px", md: "160px" }}
-                                truncate
-                                cursor="pointer"
-                                userSelect="none"
-                                textDecoration="underline"
-                                textDecorationColor="border"
-                                textUnderlineOffset="3px"
-                                borderRight={currentFolder ? "none" : { base: "1px solid", md: "1px solid" }}
-                                borderColor="border"
-                                pr={currentFolder ? "0" : { base: "3", md: "3" }}
-                                mr={currentFolder ? "0" : { base: "1", md: "1" }}
-                                _hover={{ textDecorationColor: "fg", color: "fg" }}
-                                title="Click for details"
-                            >
-                                {libraryName}
-                            </Text>
-                        </Popover.Trigger>
-                        <Portal>
-                            <Popover.Positioner>
-                                <Popover.Content
-                                    bg="white"
-                                    color="black"
-                                    border="1px solid"
-                                    borderColor="gray.200"
-                                    boxShadow="lg"
-                                    px="3"
-                                    py="2.5"
-                                    fontSize="xs"
-                                    maxW="400px"
-                                    minW="280px"
-                                >
-                                    <Popover.Arrow bg="white" borderColor="gray.200" />
-                                    {libraryPath && (
-                                        <HStack gap="2" align="center">
-                                            <Text
-                                                as="span"
-                                                fontWeight="medium"
-                                                color="gray.600"
-                                                flexShrink="0"
-                                                minW="36px"
-                                            >
-                                                Path:
-                                            </Text>
-                                            <Text
-                                                as="span"
-                                                flex="1"
-                                                wordBreak="break-all"
-                                                lineClamp="2"
-                                                title={libraryPath}
-                                            >
-                                                {libraryPath}
-                                            </Text>
-                                            <CopyButton text={libraryPath} size="2xs" colorPalette="gray" stopPropagation />
-                                        </HStack>
-                                    )}
-                                    {libraryId && (
-                                        <HStack gap="2" align="center" mt={libraryPath ? "1.5" : "0"}>
-                                            <Text
-                                                as="span"
-                                                fontWeight="medium"
-                                                color="gray.600"
-                                                flexShrink="0"
-                                                minW="36px"
-                                            >
-                                                ID:
-                                            </Text>
-                                            <Text
-                                                as="span"
-                                                flex="1"
-                                                fontFamily="mono"
-                                                wordBreak="break-all"
-                                                lineClamp="2"
-                                                title={libraryId}
-                                            >
-                                                {libraryId}
-                                            </Text>
-                                            <CopyButton text={libraryId} size="2xs" colorPalette="gray" stopPropagation />
-                                        </HStack>
-                                    )}
-                                </Popover.Content>
-                            </Popover.Positioner>
-                        </Portal>
-                    </Popover.Root>
-                )}
-
-                {/* Breadcrumb: library name + folder path */}
-                {currentFolder !== undefined && currentFolder !== "" && (
-                    <HStack
-                        gap="1"
-                        minW="0"
-                        flexShrink="1"
-                        fontSize="sm"
-                        color="fg.muted"
+                {/* Left group: nav buttons + library name + breadcrumb. It grows by
+                    the same amount as the right group below, which keeps the search
+                    box exactly centered in the row. */}
+                <Box flex="1" minW="0" display="flex" alignItems="center" gap="2" overflow="hidden">
+                    {/* Mobile: Show All button (resets folder to all assets) */}
+                    <IconButton
+                        variant="ghost"
+                        size="sm"
+                        aria-label="Show all assets"
+                        onClick={onShowAll}
+                        flexShrink="0"
+                        display={{ base: "inline-flex", md: "none" }}
                     >
-                        {/* Separator slash after library name */}
-                        <Text color="fg.subtle" flexShrink="0">/</Text>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="3" y="3" width="7" height="7" rx="1" />
+                            <rect x="14" y="3" width="7" height="7" rx="1" />
+                            <rect x="3" y="14" width="7" height="7" rx="1" />
+                            <rect x="14" y="14" width="7" height="7" rx="1" />
+                        </svg>
+                    </IconButton>
 
-                        {/* Desktop: full breadcrumb with clickable segments */}
-                        <HStack
-                            gap="1"
-                            display={{ base: "none", md: "flex" }}
-                            minW="0"
-                            flex="1"
-                        >
-                            {currentFolder === "__root__" ? (
-                                <Text color="fg.subtle" truncate>Root</Text>
-                            ) : (
-                                currentFolder.split("/").map((segment, idx, arr) => {
-                                    const isLast = idx === arr.length - 1
-                                    const parentPath = arr.slice(0, idx + 1).join("/")
-                                    return (
-                                        <HStack gap="1" key={idx} minW="0">
-                                            {idx > 0 && <Text color="fg.subtle" flexShrink="0">/</Text>}
-                                            {isLast ? (
-                                                <Text truncate color="fg.subtle">{segment}</Text>
-                                            ) : (
+                    {/* Home button (desktop) */}
+                    <IconButton
+                        variant="ghost"
+                        size="sm"
+                        aria-label="Switch library"
+                        onClick={onSwitchLibrary}
+                        flexShrink="0"
+                        display={{ base: "none", md: "inline-flex" }}
+                    >
+                        <HomeIcon />
+                    </IconButton>
+
+                    {libraryName && (
+                        <Popover.Root positioning={{ placement: "bottom-start" }}>
+                            <Popover.Trigger>
+                                <Text
+                                    fontSize="sm"
+                                    fontWeight="medium"
+                                    color="fg"
+                                    maxW={{ base: "120px", md: "160px" }}
+                                    truncate
+                                    cursor="pointer"
+                                    userSelect="none"
+                                    textDecoration="underline"
+                                    textDecorationColor="border"
+                                    textUnderlineOffset="3px"
+                                    borderRight={currentFolder ? "none" : { base: "1px solid", md: "1px solid" }}
+                                    borderColor="border"
+                                    pr={currentFolder ? "0" : { base: "3", md: "3" }}
+                                    mr={currentFolder ? "0" : { base: "1", md: "1" }}
+                                    _hover={{ textDecorationColor: "fg", color: "fg" }}
+                                    title="Click for details"
+                                >
+                                    {libraryName}
+                                </Text>
+                            </Popover.Trigger>
+                            <Portal>
+                                <Popover.Positioner>
+                                    <Popover.Content
+                                        bg="white"
+                                        color="black"
+                                        border="1px solid"
+                                        borderColor="gray.200"
+                                        boxShadow="lg"
+                                        px="3"
+                                        py="2.5"
+                                        fontSize="xs"
+                                        maxW="400px"
+                                        minW="280px"
+                                    >
+                                        <Popover.Arrow bg="white" borderColor="gray.200" />
+                                        {libraryPath && (
+                                            <HStack gap="2" align="center">
                                                 <Text
-                                                    truncate
-                                                    cursor="pointer"
-                                                    color="fg"
-                                                    _hover={{ color: "accent.default", textDecoration: "underline" }}
-                                                    onClick={() => onNavigateToFolder?.(parentPath)}
+                                                    as="span"
+                                                    fontWeight="medium"
+                                                    color="gray.600"
+                                                    flexShrink="0"
+                                                    minW="36px"
                                                 >
-                                                    {segment}
+                                                    Path:
                                                 </Text>
-                                            )}
-                                        </HStack>
-                                    )
-                                })
-                            )}
-                        </HStack>
+                                                <Text
+                                                    as="span"
+                                                    flex="1"
+                                                    wordBreak="break-all"
+                                                    lineClamp="2"
+                                                    title={libraryPath}
+                                                >
+                                                    {libraryPath}
+                                                </Text>
+                                                <CopyButton text={libraryPath} size="2xs" colorPalette="gray" stopPropagation />
+                                            </HStack>
+                                        )}
+                                        {libraryId && (
+                                            <HStack gap="2" align="center" mt={libraryPath ? "1.5" : "0"}>
+                                                <Text
+                                                    as="span"
+                                                    fontWeight="medium"
+                                                    color="gray.600"
+                                                    flexShrink="0"
+                                                    minW="36px"
+                                                >
+                                                    ID:
+                                                </Text>
+                                                <Text
+                                                    as="span"
+                                                    flex="1"
+                                                    fontFamily="mono"
+                                                    wordBreak="break-all"
+                                                    lineClamp="2"
+                                                    title={libraryId}
+                                                >
+                                                    {libraryId}
+                                                </Text>
+                                                <CopyButton text={libraryId} size="2xs" colorPalette="gray" stopPropagation />
+                                            </HStack>
+                                        )}
+                                    </Popover.Content>
+                                </Popover.Positioner>
+                            </Portal>
+                        </Popover.Root>
+                    )}
 
-                        {/* Mobile: truncated breadcrumb */}
-                        <Text
-                            display={{ base: "inline", md: "none" }}
-                            truncate
-                            color="fg.subtle"
-                            title={currentFolder}
-                        >
-                            {currentFolder === "__root__"
-                                ? "Root"
-                                : (() => {
-                                    const segments = currentFolder.split("/")
-                                    if (segments.length <= 2) {
-                                        return currentFolder
-                                    }
-                                    return `${segments[0]}/.../${segments[segments.length - 1]}`
-                                })()}
-                        </Text>
-                    </HStack>
-                )}
+                    {/* Breadcrumb region: always rendered so it absorbs the same flexible
+                    space whether or not a folder is selected. That keeps the search box
+                    from jumping between "All" and any folder path. */}
+                    <Box minW="0" flex="1" overflow="hidden">
+                        {currentFolder !== undefined && currentFolder !== "" && (
+                            <HStack
+                                gap="1"
+                                minW="0"
+                                overflow="hidden"
+                                fontSize="sm"
+                                color="fg.muted"
+                            >
+                                {/* Separator slash after library name */}
+                                <Text color="fg.subtle" flexShrink="0">/</Text>
 
-                {/* Desktop: SearchInput stays in first row */}
-                <Box flex="1" display={{ base: "none", md: "block" }}>
+                                {/* Desktop: full breadcrumb with clickable segments */}
+                                <HStack
+                                    gap="1"
+                                    display={{ base: "none", md: "flex" }}
+                                    minW="0"
+                                    flex="1"
+                                >
+                                    {currentFolder === "__root__" ? (
+                                        <Text color="fg.subtle" truncate>Root</Text>
+                                    ) : (
+                                        currentFolder.split("/").map((segment, idx, arr) => {
+                                            const isLast = idx === arr.length - 1
+                                            const parentPath = arr.slice(0, idx + 1).join("/")
+                                            return (
+                                                <HStack gap="1" key={idx} minW="0">
+                                                    {idx > 0 && <Text color="fg.subtle" flexShrink="0">/</Text>}
+                                                    {isLast ? (
+                                                        <Text truncate color="fg.subtle">{segment}</Text>
+                                                    ) : (
+                                                        <Text
+                                                            truncate
+                                                            cursor="pointer"
+                                                            color="fg"
+                                                            _hover={{ color: "accent.default", textDecoration: "underline" }}
+                                                            onClick={() => onNavigateToFolder?.(parentPath)}
+                                                        >
+                                                            {segment}
+                                                        </Text>
+                                                    )}
+                                                </HStack>
+                                            )
+                                        })
+                                    )}
+                                </HStack>
+
+                                {/* Mobile: truncated breadcrumb */}
+                                <Text
+                                    display={{ base: "inline", md: "none" }}
+                                    truncate
+                                    color="fg.subtle"
+                                    title={currentFolder}
+                                >
+                                    {currentFolder === "__root__"
+                                        ? "Root"
+                                        : (() => {
+                                            const segments = currentFolder.split("/")
+                                            if (segments.length <= 2) {
+                                                return currentFolder
+                                            }
+                                            return `${segments[0]}/.../${segments[segments.length - 1]}`
+                                        })()}
+                                </Text>
+                            </HStack>
+                        )}
+                    </Box>
+                </Box>
+
+                {/* Desktop: fixed width, centered — the two flexible groups on either
+                    side share the remaining space equally. */}
+                <Box
+                    flexShrink="0"
+                    width={{ md: "300px", lg: "380px", xl: "460px" }}
+                    display={{ base: "none", md: "block" }}
+                >
                     <SearchInput value={searchQuery} onChange={onSearchChange} libraryId={libraryId} />
                 </Box>
 
-                {/* Action buttons */}
-                <HStack gap="1" marginLeft="auto" flexShrink="0">
+                {/* Right group: actions. Mirrors the left group so the search stays centered. */}
+                <HStack flex="1" minW="0" gap="1" justify="flex-end">
                     {/* Desktop: Sort */}
                     <Menu.Root>
                         <Menu.Trigger asChild>
@@ -380,7 +426,7 @@ export function TopBar({
                         <Portal>
                             <Menu.Positioner>
                                 <Menu.Content minW="140px">
-                                    {(["newest", "name", "random"] as const).map((mode) => (
+                                    {sortModes.map((mode) => (
                                         <Menu.Item
                                             key={mode}
                                             value={mode}
@@ -399,6 +445,37 @@ export function TopBar({
                             </Menu.Positioner>
                         </Portal>
                     </Menu.Root>
+
+                    {/* Desktop: layout toggle (masonry / grid) */}
+                    <HStack
+                        gap="0"
+                        border="1px solid"
+                        borderColor="border"
+                        borderRadius="md"
+                        p="0.5"
+                        display={{ base: "none", md: "flex" }}
+                    >
+                        <IconButton
+                            size="xs"
+                            variant={viewMode === "masonry" ? "subtle" : "ghost"}
+                            colorPalette="gray"
+                            aria-label="Masonry layout"
+                            title="Masonry layout"
+                            onClick={() => onViewModeChange?.("masonry")}
+                        >
+                            <MasonryIcon />
+                        </IconButton>
+                        <IconButton
+                            size="xs"
+                            variant={viewMode === "grid" ? "subtle" : "ghost"}
+                            colorPalette="gray"
+                            aria-label="Grid layout"
+                            title="Grid layout"
+                            onClick={() => onViewModeChange?.("grid")}
+                        >
+                            <GridIcon />
+                        </IconButton>
+                    </HStack>
 
                     {/* Desktop: Add */}
                     <Button
@@ -421,6 +498,8 @@ export function TopBar({
                         toaster={toaster}
                         libraryId={libraryId}
                     />
+
+                    {/* Explore now lives in the left sidebar — see DirectoryTree */}
 
                     {/* More menu (desktop & mobile) */}
                     <Menu.Root>
@@ -460,7 +539,7 @@ export function TopBar({
                                         <Box as="span" ml="2" flex="1">Sort</Box>
                                         <Text fontSize="xs" color="fg.subtle" mr="1">{sortLabels[sortMode]}</Text>
                                     </Menu.Item>
-                                    {(["newest", "name", "random"] as const).map((mode) => (
+                                    {sortModes.map((mode) => (
                                         <Menu.Item
                                             key={mode}
                                             value={`sort-${mode}`}
@@ -471,6 +550,30 @@ export function TopBar({
                                         >
                                             <Box as="span" flex="1">{sortLabels[mode]}</Box>
                                             {sortMode === mode && (
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                                    <polyline points="20 6 9 17 4 12" />
+                                                </svg>
+                                            )}
+                                        </Menu.Item>
+                                    ))}
+                                    <Menu.Item value="view" py="2.5" display={{ md: "none" }} closeOnSelect={false}>
+                                        {viewMode === "grid" ? <GridIcon /> : <MasonryIcon />}
+                                        <Box as="span" ml="2" flex="1">Layout</Box>
+                                        <Text fontSize="xs" color="fg.subtle" mr="1">
+                                            {viewMode === "grid" ? "Grid" : "Masonry"}
+                                        </Text>
+                                    </Menu.Item>
+                                    {(["masonry", "grid"] as const).map((mode) => (
+                                        <Menu.Item
+                                            key={mode}
+                                            value={`view-${mode}`}
+                                            onClick={() => onViewModeChange?.(mode)}
+                                            py="2"
+                                            pl="10"
+                                            display={{ md: "none" }}
+                                        >
+                                            <Box as="span" flex="1">{mode === "grid" ? "Grid" : "Masonry"}</Box>
+                                            {viewMode === mode && (
                                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                                     <polyline points="20 6 9 17 4 12" />
                                                 </svg>

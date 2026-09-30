@@ -1,4 +1,4 @@
-import type { AssetDetailDto, AssetDto, AssetTag, DirectoryNode, DirectoryTreeResponse, LibraryInfo, PaginatedResponse, ScanResult, ServerBrowseResponse, ServerDrive, TagConflict, TagGroupsResponse, UploadResult } from "../types";
+import type { AssetDetailDto, AssetDto, AssetTag, BoostResultDto, DirectoryNode, DirectoryTreeResponse, LibraryInfo, PaginatedResponse, ScanResult, ServerBrowseResponse, ServerDrive, TagConflict, TagExploreResponse, TagGroupsResponse, UploadResult } from "../types";
 
 // In development (npm start), the CRA dev server proxies /api/* to the backend.
 // In production (CollectHost), the backend serves both API and static files on the same origin.
@@ -205,11 +205,14 @@ export const api = {
             xhr.send(formData)
         })
     },
-    getAssets: (libraryId: string, page: number, size: number, folder?: string, subfolders?: boolean, sort?: string) => {
+    getAssets: (libraryId: string, page: number, size: number, folder?: string, subfolders?: boolean, sort?: string, seed?: number) => {
         let url = `/api/assets?libraryId=${encodeURIComponent(libraryId)}&page=${page}&size=${size}`
         if (folder) url += `&folder=${encodeURIComponent(folder)}`
         if (subfolders !== undefined) url += `&subfolders=${subfolders}`
         if (sort) url += `&sort=${sort}`
+        // With a seed the server shuffles deterministically, so paging through
+        // sort=random never repeats or skips assets.
+        if (seed !== undefined) url += `&seed=${seed}`
         return get<PaginatedResponse<AssetDto>>(url)
     },
     getAsset: async (id: string, libraryId: string) => {
@@ -231,8 +234,44 @@ export const api = {
         if (search) params.set("search", search)
         return get<TagGroupsResponse>(`/api/tags?${params.toString()}`)
     },
+    /** Every tag with a randomly sampled asset — re-fetching reshuffles the samples. */
+    getTagExplore: (libraryId: string, maxTags?: number, search?: string) => {
+        const params = new URLSearchParams()
+        params.set("libraryId", libraryId)
+        if (maxTags) params.set("maxTags", String(maxTags))
+        if (search) params.set("search", search)
+        return get<TagExploreResponse>(`/api/tags/explore?${params.toString()}`)
+    },
     moveAsset: (id: string, targetFolder: string, libraryId: string) =>
         post<AssetDetailDto>(`/api/assets/${id}/move?libraryId=${encodeURIComponent(libraryId)}`, { targetFolder }),
+    /**
+     * Boost (up-vote) an asset. The backend allows one boost per asset per local
+     * day; a repeat call returns the current count with alreadyBoosted=true.
+     */
+    boostAsset: (id: string, libraryId: string) =>
+        post<BoostResultDto>(`/api/assets/${id}/boost?libraryId=${encodeURIComponent(libraryId)}`),
+    /**
+     * Take back today's boost: the count drops by one and the once-per-day limit
+     * is cleared, so the asset can be boosted again today.
+     */
+    undoBoost: (id: string, libraryId: string) =>
+        post<BoostResultDto>(`/api/assets/${id}/boost/undo?libraryId=${encodeURIComponent(libraryId)}`),
+    /** Clear every boost for an asset (count back to zero). */
+    resetBoosts: async (id: string, libraryId: string): Promise<BoostResultDto> => {
+        const response = await fetch(`${API_BASE}/api/assets/${id}/boost?libraryId=${encodeURIComponent(libraryId)}`, {
+            method: "DELETE",
+            headers: buildHeaders(),
+        })
+        if (!response.ok) {
+            let errorMsg = `API Error: ${response.status} ${response.statusText}`
+            try {
+                const errorBody = await response.json()
+                if (errorBody.error) errorMsg = `${response.status} - ${errorBody.error}`
+            } catch { /* ignore parsing errors */ }
+            throw new ApiError(errorMsg, response.status)
+        }
+        return response.json()
+    },
     deleteAsset: (id: string, libraryId: string) =>
         fetch(`${API_BASE}/api/assets/${id}?libraryId=${encodeURIComponent(libraryId)}`, { method: "DELETE", headers: buildHeaders() }).then((r) => {
             if (!r.ok) throw new Error("Delete failed")
@@ -261,6 +300,13 @@ export const api = {
         post<{ success: boolean }>(`/api/assets/delete-tag?libraryId=${encodeURIComponent(libraryId)}`, { value }),
     saveCategoryOrder: (libraryId: string, order: string[]) =>
         post<{ success: boolean }>(`/api/library/category-order?libraryId=${encodeURIComponent(libraryId)}`, { order }),
+    /**
+     * Persist the library's gallery layout and sort order in library.json so the
+     * preference is shared by every client that opens this library. Omitted
+     * fields keep their stored value.
+     */
+    setLibraryPreferences: (libraryId: string, prefs: { viewMode?: string; sortMode?: string }) =>
+        post<{ success: boolean }>(`/api/library/preferences?libraryId=${encodeURIComponent(libraryId)}`, prefs),
     unlockLibrary: async (libraryId: string, id: string, password: string) => {
         const result = await post<{ library: LibraryInfo; token: string }>(`/api/library/unlock?libraryId=${encodeURIComponent(libraryId)}`, { password });
         setToken(result.token);

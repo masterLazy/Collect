@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Collect.Core.Dtos;
@@ -26,6 +27,10 @@ public partial class AssetService : IAssetService
     private readonly IEncryptionService _encryptionService;
     private readonly ILogger<AssetService> _logger;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
+
+    // Boost data lives in .collect/boosts.json. This service is a singleton, so the
+    // cache is keyed by library path — never by instance — and is refreshed on write.
+    private readonly ConcurrentDictionary<string, BoostsStore> _boostsCache = new();
 
     // Serializes destructive encrypt/decrypt operations across separate backend instances
     // (standalone server + WPF host) operating on the same library simultaneously.
@@ -713,7 +718,33 @@ public partial class AssetService : IAssetService
     //  Read / List / Detail
     // ──────────────────────────────────────────────
 
-    public async Task<PaginatedResponse<AssetDto>> GetAssetsAsync(int page, int pageSize, string sort, string? folder = null, bool subfolders = true)
+    /// <summary>
+    /// Stable sort key for the seeded "random" order. Derived from the asset ID
+    /// alone (FNV-1a mixed with the seed) rather than the asset's position, so the
+    /// relative order survives rescans that insert or remove assets, and every
+    /// client paging with the same seed walks the very same sequence.
+    /// </summary>
+    private static uint ShuffleKey(string assetId, int seed)
+    {
+        unchecked
+        {
+            const uint offsetBasis = 2166136261;
+            const uint prime = 16777619;
+
+            var hash = offsetBasis;
+            foreach (var ch in assetId)
+            {
+                hash ^= ch;
+                hash *= prime;
+            }
+
+            hash ^= (uint)seed;
+            hash *= prime;
+            return hash;
+        }
+    }
+
+    public async Task<PaginatedResponse<AssetDto>> GetAssetsAsync(int page, int pageSize, string sort, string? folder = null, bool subfolders = true, int? seed = null)
     {
         await EnsureScannedAsync();
 
@@ -754,7 +785,17 @@ public partial class AssetService : IAssetService
             "oldest" => filtered.OrderBy(a => a.LastModified ?? a.ImportedAt).ToList(),
             "name" => filtered.OrderBy(a => a.FileName).ToList(),
             "size" => filtered.OrderByDescending(a => a.FileSize).ToList(),
-            "random" => filtered.OrderBy(_ => Guid.NewGuid()).ToList(),
+            // Seeded order: the same seed always yields the same sequence, so paging
+            // through the list cannot repeat or skip assets. Arriving without a seed
+            // means "surprise me", so a fresh one is used for this request only.
+            "random" => filtered
+                .OrderBy(a => ShuffleKey(a.Id, seed ?? Random.Shared.Next()))
+                .ToList(),
+            // Most boosted first; ties fall back to the newest asset.
+            "boosts" => filtered
+                .OrderByDescending(a => GetBoostInfo(a.Id).Count)
+                .ThenByDescending(a => a.LastModified ?? a.ImportedAt)
+                .ToList(),
             _ => filtered.OrderByDescending(a => a.LastModified ?? a.ImportedAt).ToList() // newest default
         };
 
@@ -1730,6 +1771,7 @@ public partial class AssetService : IAssetService
     {
         var libraryId = _libraryService.GetLibraryId();
         var query = libraryId is not null ? $"?libraryId={libraryId}" : "";
+        var boost = GetBoostInfo(asset.Id);
         return new AssetDto
         {
             Id = asset.Id,
@@ -1740,7 +1782,9 @@ public partial class AssetService : IAssetService
             Height = asset.Height,
             ThumbnailUrl = $"/api/assets/{asset.Id}/thumbnail{query}",
             ImportedAt = asset.ImportedAt,
-            LastModified = asset.LastModified
+            LastModified = asset.LastModified,
+            BoostCount = boost.Count,
+            BoostedToday = boost.BoostedToday
         };
     }
 
@@ -1769,6 +1813,7 @@ public partial class AssetService : IAssetService
 
         var libraryId = _libraryService.GetLibraryId();
         var query = libraryId is not null ? $"?libraryId={libraryId}" : "";
+        var boost = GetBoostInfo(asset.Id);
         return new AssetDetailDto
         {
             Id = asset.Id,
@@ -1783,7 +1828,159 @@ public partial class AssetService : IAssetService
             ImageUrl = $"/api/assets/{asset.Id}/image{query}",
             ImportedAt = asset.ImportedAt,
             LastModified = asset.LastModified,
+            BoostCount = boost.Count,
+            BoostedToday = boost.BoostedToday,
             Palette = asset.Palette
+        };
+    }
+
+    // ──────────────────────────────────────────────
+    //  Boosts (up-votes)
+    // ──────────────────────────────────────────────
+
+    private BoostsStore GetBoostsStore(string libraryPath) =>
+        _boostsCache.GetOrAdd(libraryPath, path => BoostsStore.Load(path));
+
+    /// <summary>
+    /// Boost count and whether today's boost has already been used, for one asset.
+    /// </summary>
+    private (int Count, bool BoostedToday) GetBoostInfo(string assetId)
+    {
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return (0, false);
+
+        if (!GetBoostsStore(libraryPath).Boosts.TryGetValue(assetId, out var record))
+            return (0, false);
+
+        return (record.Count, record.LastBoostedDate == BoostsStore.TodayKey());
+    }
+
+    /// <summary>
+    /// Load the boosts store fresh from disk, apply <paramref name="mutate"/> to one
+    /// asset's record, then persist when something changed. Shared by the boost,
+    /// undo and reset operations so they all serialize on the same semaphore.
+    /// Returns (count, boostedToday, changed), or null when the asset does not exist.
+    /// </summary>
+    private async Task<(int Count, bool BoostedToday, bool Changed)?> MutateBoostAsync(
+        string id, string logVerb, Func<BoostRecord, bool> mutate)
+    {
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return null;
+
+        await EnsureScannedAsync();
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            var asset = _assets.FirstOrDefault(a => a.Id == id);
+            if (asset is null) return null;
+
+            // Read fresh from disk: another instance may have written since the cache was filled.
+            var store = BoostsStore.Load(libraryPath);
+            if (!store.Boosts.TryGetValue(id, out var record))
+            {
+                record = new BoostRecord();
+                store.Boosts[id] = record;
+            }
+
+            var changed = mutate(record);
+
+            // A record with no boosts and no date carries no information — drop it so
+            // boosts.json does not accumulate empty entries.
+            if (record.Count == 0 && record.LastBoostedDate is null)
+                store.Boosts.Remove(id);
+
+            if (changed) store.Save(libraryPath);
+            _boostsCache[libraryPath] = store;
+
+            if (changed)
+                _logger.LogInformation("{Verb}: {File} → {Count}", logVerb, asset.FileName, record.Count);
+
+            return (record.Count, record.LastBoostedDate == BoostsStore.TodayKey(), changed);
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Boost an asset. Each asset can be boosted once per local day; a second
+    /// attempt on the same day returns the current state with AlreadyBoosted set.
+    /// Returns null when the asset does not exist.
+    /// </summary>
+    public async Task<BoostResultDto?> BoostAssetAsync(string id)
+    {
+        var outcome = await MutateBoostAsync(id, "Boost", record =>
+        {
+            if (record.LastBoostedDate == BoostsStore.TodayKey()) return false;
+            record.Count += 1;
+            record.LastBoostedDate = BoostsStore.TodayKey();
+            return true;
+        });
+
+        if (outcome is null) return null;
+        var (count, boostedToday, changed) = outcome.Value;
+        return new BoostResultDto
+        {
+            AssetId = id,
+            Count = count,
+            BoostedToday = boostedToday,
+            AlreadyBoosted = !changed,
+            Changed = changed
+        };
+    }
+
+    /// <summary>
+    /// Take back today's boost: the count drops by one and the daily limit is
+    /// cleared, so the asset can be boosted again today. A no-op when the asset
+    /// has not been boosted today. Returns null when the asset does not exist.
+    /// </summary>
+    public async Task<BoostResultDto?> UndoBoostAsync(string id)
+    {
+        var outcome = await MutateBoostAsync(id, "Undo boost", record =>
+        {
+            if (record.LastBoostedDate != BoostsStore.TodayKey()) return false;
+            record.Count = Math.Max(0, record.Count - 1);
+            record.LastBoostedDate = null;
+            return true;
+        });
+
+        if (outcome is null) return null;
+        var (count, boostedToday, changed) = outcome.Value;
+        return new BoostResultDto
+        {
+            AssetId = id,
+            Count = count,
+            BoostedToday = boostedToday,
+            AlreadyBoosted = false,
+            Changed = changed
+        };
+    }
+
+    /// <summary>
+    /// Clear every boost for an asset (count back to zero, daily limit cleared).
+    /// Returns null when the asset does not exist.
+    /// </summary>
+    public async Task<BoostResultDto?> ResetBoostCountAsync(string id)
+    {
+        var outcome = await MutateBoostAsync(id, "Reset boosts", record =>
+        {
+            if (record.Count == 0 && record.LastBoostedDate is null) return false;
+            record.Count = 0;
+            record.LastBoostedDate = null;
+            return true;
+        });
+
+        if (outcome is null) return null;
+        var (count, boostedToday, changed) = outcome.Value;
+        return new BoostResultDto
+        {
+            AssetId = id,
+            Count = count,
+            BoostedToday = boostedToday,
+            AlreadyBoosted = false,
+            Changed = changed
         };
     }
 

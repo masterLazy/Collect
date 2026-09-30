@@ -9,6 +9,10 @@ interface DirectoryTreeProps {
     onMoveAsset?: (assetId: string, targetFolder: string) => void
     refreshKey?: number
     libraryId: string
+    /** Navigate to the Explore page (tag browser). */
+    onOpenExplore?: () => void
+    /** True while the Explore page is showing. */
+    exploreActive?: boolean
 }
 
 function FolderIcon() {
@@ -46,6 +50,15 @@ function UncategorizedIcon() {
             <path d="M7.5 10.5h9" />
             <path d="M6.5 14.5h11" />
             <path d="M12 3v1" />
+        </svg>
+    )
+}
+
+function CompassIcon() {
+    return (
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9" />
+            <polygon points="15.5 8.5 10.5 10.5 8.5 15.5 13.5 13.5" />
         </svg>
     )
 }
@@ -194,33 +207,25 @@ function FolderNode({
     return (
         <Box>
             <HStack
-                gap="1"
-                py="1.5"
-                pl={3 + depth * 4}
-                pr="3"
+                gap="2"
+                height="30px"
+                pl={`${8 + depth * 14}px`}
+                pr="2"
+                mx="1"
+                borderRadius="sm"
                 cursor="pointer"
                 position="relative"
-                bg={dragOver
-                    ? { base: "blue.100", _dark: "blue.800" }
-                    : isSelected
-                        ? { base: "blue.50", _dark: "blue.950" }
-                        : "transparent"}
+                bg={dragOver || isSelected ? "bg.muted" : "transparent"}
                 borderLeft="2px solid"
-                borderLeftColor={dragOver
-                    ? { base: "blue.300", _dark: "blue.600" }
-                    : isSelected
-                        ? isUncategorized
-                            ? { base: "blue.600", _dark: "blue.400" }
-                            : "accent.default"
-                        : "transparent"}
-                _hover={{ bg: dragOver ? { base: "blue.100", _dark: "blue.800" } : { base: "blue.50", _dark: "blue.950" } }}
+                borderLeftColor={dragOver ? "border.emphasized" : isSelected ? "fg.muted" : "transparent"}
+                _hover={{ bg: dragOver || isSelected ? "bg.muted" : "bg.subtle" }}
                 onClick={handleClick}
                 onMouseEnter={() => setIsHovered(true)}
                 onMouseLeave={() => setIsHovered(false)}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
-                transition="background 0.1s"
+                transition="background 0.12s"
                 role="treeitem"
                 aria-selected={isSelected}
                 title={node.path || node.name}
@@ -238,15 +243,15 @@ function FolderNode({
                 >
                     <ChevronIcon expanded={expanded} />
                 </Box>
-                <Box as="span" color={isUncategorized ? { _light: "blue.600", _dark: "blue.400" } : "fg.muted"} flexShrink="0" display="inline-flex">
+                <Box as="span" color="fg.muted" flexShrink="0" display="inline-flex">
                     {isUncategorized ? <UncategorizedIcon /> : <FolderIcon />}
                 </Box>
                 <Text
                     fontSize="sm"
-                    color={isUncategorized ? { _light: "blue.700", _dark: "blue.300" } : "fg"}
+                    color="fg"
                     truncate
                     flex="1"
-                    fontWeight={isSelected ? "semibold" : "normal"}
+                    fontWeight={isSelected ? "medium" : "normal"}
                 >
                     {node.name}
                 </Text>
@@ -461,7 +466,7 @@ function FolderNode({
     )
 }
 
-export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refreshKey, libraryId }: DirectoryTreeProps) {
+export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refreshKey, libraryId, onOpenExplore, exploreActive }: DirectoryTreeProps) {
     const [tree, setTree] = useState<DirectoryNodeType | null>(null)
     const [loading, setLoading] = useState(true)
     const [totalAssetCount, setTotalAssetCount] = useState(0)
@@ -523,104 +528,149 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
         : []
 
     return (
-        <Stack gap="0" role="tree" aria-label="Directory tree">
-            {/* "All" root item */}
-            <HStack
-                gap="1"
-                py="1.5"
-                px="3"
-                cursor="pointer"
-                bg={currentFolder === "" ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
-                borderLeft="2px solid"
-                borderLeftColor={currentFolder === "" ? { base: "blue.600", _dark: "blue.400" } : "transparent"}
-                _hover={{ bg: { base: "blue.50", _dark: "blue.950" } }}
-                onClick={() => onFolderChange("")}
-                transition="background 0.1s"
-                role="treeitem"
-                aria-selected={currentFolder === ""}
-            >
-                <Box width="14px" flexShrink="0" />
-                <Box as="span" color={{ _light: "blue.600", _dark: "blue.400" }} flexShrink="0" display="inline-flex">
-                    <AllIcon />
-                </Box>
-                <Text fontSize="sm" color={{ _light: "blue.700", _dark: "blue.300" }} truncate flex="1" fontWeight="semibold">
-                    All
-                </Text>
-                {totalAssetCount > 0 && (
-                    <Text fontSize="xs" color="fg.subtle" flexShrink="0">
-                        {totalAssetCount}
-                    </Text>
-                )}
-            </HStack>
-
-            {/* Separator line */}
-            <Box h="1px" bg="border" mx="3" my="1" />
-
-            {loading ? (
-                <Text fontSize="xs" color="fg.subtle" px="3" py="2">
-                    Loading...
-                </Text>
-            ) : (
-                <>
-                    {/* Uncategorized — always first among folders */}
-                    {sortedChildren.filter((c) => c.name === "Uncategorized").map((child) => (
-                        <FolderNode
-                            key={child.path}
-                            node={child}
-                            depth={0}
-                            currentFolder={currentFolder}
-                            onFolderChange={onFolderChange}
-                            loadTree={loadTree}
-                            onMoveAsset={onMoveAsset}
-                            libraryId={libraryId}
-                        />
-                    ))}
-
-                    {/* "Root" item — assets not in any subdirectory */}
-                    <HStack
-                        gap="1"
-                        py="1.5"
-                        px="3"
+        <Stack gap="0" flex="1" minH="0">
+            {/* Explore is a plain row in the list — it scrolls with the tree instead
+                of being pinned above it. */}
+            <Box flex="1" minH="0" overflowY="auto">
+            {onOpenExplore && (
+                    <Box
+                        as="button"
+                        onClick={onOpenExplore}
+                        display="flex"
+                        alignItems="center"
+                        gap="2"
+                        height="30px"
+                        pl="8px"
+                        pr="2"
+                        mt="1"
+                        mx="1"
+                        width="calc(100% - 8px)"
+                        borderRadius="sm"
                         cursor="pointer"
-                        bg={rootDragOver ? { base: "blue.100", _dark: "blue.800" } : currentFolder === "__root__" ? { base: "blue.50", _dark: "blue.950" } : "transparent"}
+                        bg={exploreActive ? "bg.muted" : "transparent"}
                         borderLeft="2px solid"
-                        borderLeftColor={rootDragOver ? { base: "blue.300", _dark: "blue.600" } : currentFolder === "__root__" ? "accent.default" : "transparent"}
-                        _hover={{ bg: rootDragOver ? { base: "blue.100", _dark: "blue.800" } : { base: "blue.50", _dark: "blue.950" } }}
-                        onClick={() => onFolderChange("__root__")}
-                        onDragOver={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(true); e.dataTransfer.dropEffect = "move"; }}
-                        onDragLeave={(e: React.DragEvent) => { e.stopPropagation(); setRootDragOver(false); }}
-                        onDrop={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(false); const assetId = e.dataTransfer.getData("text/plain"); if (assetId && onMoveAsset) { onMoveAsset(assetId, ""); } }}
-                        transition="background 0.1s"
-                        role="treeitem"
-                        aria-selected={currentFolder === "__root__"}
+                        borderLeftColor={exploreActive ? "fg.muted" : "transparent"}
+                        _hover={{ bg: exploreActive ? "bg.muted" : "bg.subtle" }}
+                        _focusVisible={{ outline: "2px solid", outlineColor: "border.emphasized", outlineOffset: "-2px" }}
+                        transition="background 0.12s"
+                        title="Explore tags"
                     >
                         <Box width="14px" flexShrink="0" />
                         <Box as="span" color="fg.muted" flexShrink="0" display="inline-flex">
-                            <RootIcon />
+                            <CompassIcon />
                         </Box>
-                        <Text fontSize="sm" color="fg" truncate flex="1">
-                            Root
+                        <Text fontSize="sm" color="fg" truncate flex="1" textAlign="left" fontWeight={exploreActive ? "medium" : "normal"}>
+                            Explore
                         </Text>
-                    </HStack>
+                    </Box>
+                )}
+            <Stack gap="0" role="tree" aria-label="Directory tree">
+                {/* "All" root item */}
+                <HStack
+                    gap="2"
+                    height="30px"
+                    pl="8px"
+                    pr="2"
+                    mx="1"
+                    borderRadius="sm"
+                    cursor="pointer"
+                    bg={currentFolder === "" ? "bg.muted" : "transparent"}
+                    borderLeft="2px solid"
+                    borderLeftColor={currentFolder === "" ? "fg.muted" : "transparent"}
+                    _hover={{ bg: currentFolder === "" ? "bg.muted" : "bg.subtle" }}
+                    onClick={() => onFolderChange("")}
+                    transition="background 0.12s"
+                    role="treeitem"
+                    aria-selected={currentFolder === ""}
+                >
+                    <Box width="14px" flexShrink="0" />
+                    <Box as="span" color="fg.muted" flexShrink="0" display="inline-flex">
+                        <AllIcon />
+                    </Box>
+                    <Text fontSize="sm" color="fg" truncate flex="1" fontWeight={currentFolder === "" ? "medium" : "normal"}>
+                        All
+                    </Text>
+                    {totalAssetCount > 0 && (
+                        <Text fontSize="xs" color="fg.subtle" flexShrink="0">
+                            {totalAssetCount}
+                        </Text>
+                    )}
+                </HStack>
 
-                    {/* Regular folders */}
-                    {sortedChildren.filter((c) => c.name !== "Uncategorized").map((child) => (
-                        <FolderNode
-                            key={child.path}
-                            node={child}
-                            depth={0}
-                            currentFolder={currentFolder}
-                            onFolderChange={onFolderChange}
-                            loadTree={loadTree}
-                            onMoveAsset={onMoveAsset}
-                            libraryId={libraryId}
-                        />
-                    ))}
-                </>
-            )}
+                {/* Separator line */}
+                <Box h="1px" bg="border" mx="2" my="1" />
 
-            {/* New Folder button */}
-            <Box px="3" pt="3">
+                {loading ? (
+                    <Text fontSize="xs" color="fg.subtle" px="3" py="2">
+                        Loading...
+                    </Text>
+                ) : (
+                    <>
+                        {/* Uncategorized — always first among folders */}
+                        {sortedChildren.filter((c) => c.name === "Uncategorized").map((child) => (
+                            <FolderNode
+                                key={child.path}
+                                node={child}
+                                depth={0}
+                                currentFolder={currentFolder}
+                                onFolderChange={onFolderChange}
+                                loadTree={loadTree}
+                                onMoveAsset={onMoveAsset}
+                                libraryId={libraryId}
+                            />
+                        ))}
+
+                        {/* "Root" item — assets not in any subdirectory */}
+                        <HStack
+                            gap="2"
+                            height="30px"
+                            pl="8px"
+                            pr="2"
+                            mx="1"
+                            borderRadius="sm"
+                            cursor="pointer"
+                            bg={rootDragOver || currentFolder === "__root__" ? "bg.muted" : "transparent"}
+                            borderLeft="2px solid"
+                            borderLeftColor={rootDragOver ? "border.emphasized" : currentFolder === "__root__" ? "fg.muted" : "transparent"}
+                            _hover={{ bg: rootDragOver || currentFolder === "__root__" ? "bg.muted" : "bg.subtle" }}
+                            onClick={() => onFolderChange("__root__")}
+                            onDragOver={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(true); e.dataTransfer.dropEffect = "move"; }}
+                            onDragLeave={(e: React.DragEvent) => { e.stopPropagation(); setRootDragOver(false); }}
+                            onDrop={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(false); const assetId = e.dataTransfer.getData("text/plain"); if (assetId && onMoveAsset) { onMoveAsset(assetId, ""); } }}
+                            transition="background 0.12s"
+                            role="treeitem"
+                            aria-selected={currentFolder === "__root__"}
+                        >
+                            <Box width="14px" flexShrink="0" />
+                            <Box as="span" color="fg.muted" flexShrink="0" display="inline-flex">
+                                <RootIcon />
+                            </Box>
+                            <Text fontSize="sm" color="fg" truncate flex="1" fontWeight={currentFolder === "__root__" ? "medium" : "normal"}>
+                                Root
+                            </Text>
+                        </HStack>
+
+                        {/* Regular folders */}
+                        {sortedChildren.filter((c) => c.name !== "Uncategorized").map((child) => (
+                            <FolderNode
+                                key={child.path}
+                                node={child}
+                                depth={0}
+                                currentFolder={currentFolder}
+                                onFolderChange={onFolderChange}
+                                loadTree={loadTree}
+                                onMoveAsset={onMoveAsset}
+                                libraryId={libraryId}
+                            />
+                        ))}
+                    </>
+                )}
+
+            </Stack>
+            </Box>
+
+            {/* New Folder — pinned below the scrolling list */}
+            <Box px="2" pt="2" pb="1" flexShrink="0" borderTopWidth="1px" borderColor="border">
                 <Button size="xs" variant="outline" width="full" onClick={() => setCreateDirOpen(true)}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />

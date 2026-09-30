@@ -22,6 +22,7 @@ import { MasonryGrid } from "./MasonryGrid"
 import { Sidebar } from "./Sidebar"
 import { DirectoryTree } from "./DirectoryTree"
 import { AddAssetDialog } from "./AddAssetDialog"
+import { TagExplore } from "./TagExplore"
 import { TagConflictDialog } from "./TagConflictDialog"
 import { useCustomToaster, ToastContainer, CustomToaster } from "./CustomToast"
 import { api, ApiError } from "../services/api"
@@ -29,6 +30,10 @@ import { imageFilesFromDataTransfer } from "../lib/clipboardFiles"
 import type { AssetDto, TagConflict } from "../types"
 
 const PAGE_SIZE = 30
+
+// While the Explore page is showing, no tree row matches this sentinel, so only
+// the Explore entry itself renders as selected.
+const EXPLORE_SELECTION_SENTINEL = "__explore__"
 
 // Convert internal folder value to API folder parameter
 const toApiFolder = (folder: string): string | undefined => {
@@ -42,7 +47,18 @@ const toApiFolder = (folder: string): string | undefined => {
 const getSubfolders = (folder: string): boolean | undefined =>
     folder === "__root__" ? false : undefined
 
-export type SortMode = "newest" | "name" | "random"
+export type SortMode = "newest" | "name" | "random" | "boosts"
+
+export type ViewMode = "masonry" | "grid"
+
+// Gallery layout and sort order are per-library preferences: they are persisted in
+// the library's .collect/library.json so every client opening the library sees the
+// same choice. Sort additionally rides in the URL (?sort=) so a shared link keeps
+// its ordering — the URL wins when both are present.
+const isViewMode = (value: unknown): value is ViewMode => value === "masonry" || value === "grid"
+
+const isSortMode = (value: unknown): value is SortMode =>
+    value === "newest" || value === "name" || value === "random" || value === "boosts"
 
 // True when the API call failed with HTTP 403. In strict mode a *locked*
 // name-encrypted library (encryptFileNames) returns 403 for list/search/
@@ -87,13 +103,23 @@ export function LibraryPage() {
     const [conflictDialogOpen, setConflictDialogOpen] = useState(false)
     const [resolvingConflicts, setResolvingConflicts] = useState(false)
     const [isMobile, setIsMobile] = useState(false)
-    const sortFromUrl = (new URLSearchParams(location.search).get("sort") as SortMode) || "newest"
+    const sortParamFromUrl = new URLSearchParams(location.search).get("sort")
+    const sortFromUrl = isSortMode(sortParamFromUrl) ? sortParamFromUrl : "newest"
     const [alwaysShowSearch, setAlwaysShowSearch] = useState(alwaysShowSearchFromUrl)
     const [sortMode, setSortMode] = useState<SortMode>(sortFromUrl)
+    const [viewMode, setViewMode] = useState<ViewMode>("masonry")
+    // Seed for the "random" sort. Fixed for as long as the view stays on random, so
+    // every page request walks the same shuffled sequence; picking Random again in
+    // the sort menu rolls a new seed, which reshuffles the whole list.
+    const randomSeedRef = useRef<number>(Math.floor(Math.random() * 1_000_000_000))
 
     const [libraryName, setLibraryName] = useState("")
     const [libraryFullId, setLibraryFullId] = useState("")
     const [libraryPath, setLibraryPath] = useState("")
+
+    // Explore mode: same shell (top bar, folder tree), but the content area shows
+    // the tag browser instead of the asset grid. Driven by the route.
+    const exploreMode = location.pathname.replace(/\/+$/, "").endsWith("/explore")
 
     const [showUnlockDialog, setShowUnlockDialog] = useState(false)
     const [unlockPassword, setUnlockPassword] = useState("")
@@ -135,6 +161,10 @@ export function LibraryPage() {
                 setLibraryName(info.name)
                 setLibraryFullId(info.id)
                 setLibraryPath(info.path)
+                // Restore the library's persisted view preferences. An explicit
+                // ?sort= in the URL wins so shared links keep their ordering.
+                if (!sortParamFromUrl && isSortMode(info.sortMode)) setSortMode(info.sortMode)
+                if (isViewMode(info.viewMode)) setViewMode(info.viewMode)
                 if (info.isEncrypted) {
                     setLibraryEncrypted(true)
                     // Check if already unlocked (10-min persistence)
@@ -242,9 +272,11 @@ export function LibraryPage() {
 
     // Build the library URL for folder/search/sort, optionally appending an asset
     // hash. Folder/search/sort changes intentionally drop any hash.
-    const buildUrl = useCallback((folder: string, query: string, sort?: string, hash?: string) => {
+    const buildUrl = useCallback((folder: string, query: string, sort?: string, hash?: string, leaveExplore = false) => {
         let base: string
-        if (folder === "") {
+        if (exploreMode && !leaveExplore) {
+            base = `/${libraryId}/explore` // Explore keeps its route while searching
+        } else if (folder === "") {
             base = `/${libraryId}` // All
         } else if (folder === "__root__") {
             base = `/${libraryId}/root` // Root
@@ -258,7 +290,7 @@ export function LibraryPage() {
         if (alwaysShowSearch) params.set("ss", "1")
         const searchStr = params.toString()
         return `${base}${searchStr ? `?${searchStr}` : ""}${hash ? `#${hash}` : ""}`
-    }, [libraryId, alwaysShowSearch, sortMode])
+    }, [libraryId, alwaysShowSearch, sortMode, exploreMode])
 
     // Update URL when folder or search changes (skip the initial sync)
     const updateUrl = useCallback((folder: string, query: string, sort?: string) => {
@@ -273,7 +305,10 @@ export function LibraryPage() {
             if (query) {
                 result = await api.searchAssets(libraryId!, query, pageNum, PAGE_SIZE, folder || undefined)
             } else {
-                result = await api.getAssets(libraryId!, pageNum, PAGE_SIZE, folder || undefined, subfolders, resolvedSort === "newest" ? undefined : resolvedSort)
+                // Random order is driven by a seed kept for this view: every page
+                // request reuses it, so scrolling never shows the same asset twice.
+                const seed = resolvedSort === "random" ? randomSeedRef.current : undefined
+                result = await api.getAssets(libraryId!, pageNum, PAGE_SIZE, folder || undefined, subfolders, resolvedSort === "newest" ? undefined : resolvedSort, seed)
             }
             setAssets((prev) => (append ? [...prev, ...result.items] : result.items))
             setTotal(result.total)
@@ -317,20 +352,146 @@ export function LibraryPage() {
             setSelectedTags([])
         }
 
-        if (!libraryLoading) {
+        if (!libraryLoading && !exploreMode) {
             loadAssets(1, query, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
         }
-    }, [currentFolder, libraryLoading, loadAssets, updateUrl, sortMode])
+    }, [currentFolder, libraryLoading, loadAssets, updateUrl, sortMode, exploreMode])
+
+    // ── Library view preferences (persisted in library.json) ──
+    // Rapid toggling would otherwise write the file once per click, so pending
+    // changes are coalesced and flushed on a short timer (and on unmount).
+    const prefsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const pendingPrefsRef = useRef<{ viewMode?: ViewMode; sortMode?: SortMode }>({})
+
+    const flushPreferences = useCallback(() => {
+        if (prefsTimerRef.current) {
+            clearTimeout(prefsTimerRef.current)
+            prefsTimerRef.current = null
+        }
+        const pending = pendingPrefsRef.current
+        pendingPrefsRef.current = {}
+        if (!libraryId || Object.keys(pending).length === 0) return
+        api.setLibraryPreferences(libraryId, pending).catch(() => {
+            toaster.create({
+                title: "Could not save view preferences",
+                description: "The layout will not be remembered for this library.",
+                type: "warning",
+            })
+        })
+    }, [libraryId, toaster])
+
+    const savePreferences = useCallback((prefs: { viewMode?: ViewMode; sortMode?: SortMode }) => {
+        pendingPrefsRef.current = { ...pendingPrefsRef.current, ...prefs }
+        if (prefsTimerRef.current) clearTimeout(prefsTimerRef.current)
+        prefsTimerRef.current = setTimeout(() => {
+            prefsTimerRef.current = null
+            flushPreferences()
+        }, 500)
+    }, [flushPreferences])
+
+    // Flush a pending write when the page unmounts (e.g. switching libraries).
+    useEffect(() => () => flushPreferences(), [flushPreferences])
+
+    const handleViewModeChange = useCallback((mode: ViewMode) => {
+        setViewMode(mode)
+        savePreferences({ viewMode: mode })
+    }, [savePreferences])
 
     const handleSortChange = useCallback((mode: SortMode) => {
+        if (mode === "random") randomSeedRef.current = Math.floor(Math.random() * 1_000_000_000)
         setSortMode(mode)
         setPage(1)
         setAssets([])
         updateUrl(currentFolder, searchQuery, mode)
+        savePreferences({ sortMode: mode })
         if (!libraryLoading) {
             loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder), mode)
         }
-    }, [currentFolder, libraryLoading, loadAssets, updateUrl, searchQuery])
+    }, [currentFolder, libraryLoading, loadAssets, updateUrl, searchQuery, savePreferences])
+
+    // Boost (up-vote) an asset. The backend allows one boost per asset per day,
+    // so the count is updated optimistically and reverted if the call fails.
+    const boostInFlightRef = useRef<Set<string>>(new Set())
+
+    const applyBoostState = useCallback((id: string, boostCount: number, boostedToday: boolean) => {
+        setAssets((prev) => prev.map((a) => (a.id === id ? { ...a, boostCount, boostedToday } : a)))
+    }, [])
+
+    // Latest authoritative boost state, so an open sidebar showing the same asset
+    // reflects a boost made from the grid (and vice versa).
+    const [boostPatch, setBoostPatch] = useState<{ id: string; count: number; boostedToday: boolean } | null>(null)
+
+    const handleBoost = useCallback(async (id: string) => {
+        if (boostInFlightRef.current.has(id)) return
+        const current = assets.find((a) => a.id === id)
+        if (!current || !libraryId) return
+        if (current.boostedToday) {
+            toaster.create({
+                title: "Already boosted today",
+                description: "Each asset can be boosted once per day.",
+                type: "info",
+            })
+            return
+        }
+
+        boostInFlightRef.current.add(id)
+        const previousCount = current.boostCount
+        applyBoostState(id, previousCount + 1, true)
+        try {
+            const result = await api.boostAsset(id, libraryId)
+            applyBoostState(id, result.count, result.boostedToday)
+            setBoostPatch({ id, count: result.count, boostedToday: result.boostedToday })
+            if (result.alreadyBoosted) {
+                toaster.create({
+                    title: "Already boosted today",
+                    description: "Each asset can be boosted once per day.",
+                    type: "info",
+                })
+            }
+        } catch {
+            applyBoostState(id, previousCount, false)
+            toaster.create({
+                title: "Boost failed",
+                description: "Could not record the boost. Check the backend server.",
+                type: "error",
+            })
+        } finally {
+            boostInFlightRef.current.delete(id)
+        }
+    }, [assets, libraryId, toaster, applyBoostState])
+
+    // Take back today's boost: count drops by one and the asset can be boosted
+    // again today. Only today's boost is undone — use the sidebar to clear all.
+    const handleUndoBoost = useCallback(async (id: string) => {
+        if (boostInFlightRef.current.has(id)) return
+        const current = assets.find((a) => a.id === id)
+        if (!current || !libraryId) return
+
+        boostInFlightRef.current.add(id)
+        const previous = { count: current.boostCount, boostedToday: current.boostedToday }
+        applyBoostState(id, Math.max(0, previous.count - 1), false)
+        try {
+            const result = await api.undoBoost(id, libraryId)
+            applyBoostState(id, result.count, result.boostedToday)
+            setBoostPatch({ id, count: result.count, boostedToday: result.boostedToday })
+            toaster.create({
+                title: result.changed ? "Boost removed" : "Nothing to undo",
+                description: result.changed
+                    ? "Today's boost was taken back — you can boost this asset again today."
+                    : "This asset was not boosted today.",
+                type: "info",
+            })
+        } catch {
+            applyBoostState(id, previous.count, previous.boostedToday)
+            toaster.create({
+                title: "Could not remove boost",
+                description: "Check the backend server.",
+                type: "error",
+            })
+        } finally {
+            boostInFlightRef.current.delete(id)
+        }
+    }, [assets, libraryId, toaster, applyBoostState])
 
     const handleTagsChange = useCallback((tags: string[]) => {
         setSelectedTags(tags)
@@ -508,9 +669,15 @@ export function LibraryPage() {
         setCurrentFolder(folder)
         setPage(1)
         setAssets([])
-        updateUrl(folder, searchQuery)
+        if (exploreMode) {
+            // Picking a folder leaves the Explore view. buildUrl is Explore-aware
+            // (to keep the route while searching), so opt out explicitly here.
+            navigate(buildUrl(folder, searchQuery, undefined, undefined, true))
+        } else {
+            updateUrl(folder, searchQuery)
+        }
         loadAssets(1, searchQuery, false, toApiFolder(folder), getSubfolders(folder))
-    }, [loadAssets, updateUrl, searchQuery])
+    }, [loadAssets, updateUrl, searchQuery, exploreMode, buildUrl, navigate])
 
     const handleSelectAsset = useCallback((id: string) => {
         setSelectedAssetId(id)
@@ -635,6 +802,8 @@ export function LibraryPage() {
                 }}
                 sortMode={sortMode}
                 onSortChange={handleSortChange}
+                viewMode={viewMode}
+                onViewModeChange={handleViewModeChange}
             />
 
             <Box
@@ -647,33 +816,52 @@ export function LibraryPage() {
                 <Box
                     width="220px"
                     minWidth="180px"
-                    overflow="hidden auto"
                     borderRight="1px solid"
                     borderColor="border"
-                    display={{ base: "none", md: "block" }}
+                    display={{ base: "none", md: "flex" }}
+                    flexDirection="column"
+                    minH="0"
                     py="2"
                 >
-                    <DirectoryTree currentFolder={currentFolder} onFolderChange={handleFolderChange} onMoveAsset={handleMoveAsset} refreshKey={treeRefreshKey} libraryId={libraryId!} />
+                    <DirectoryTree currentFolder={exploreMode ? EXPLORE_SELECTION_SENTINEL : currentFolder} onFolderChange={handleFolderChange} onMoveAsset={handleMoveAsset} refreshKey={treeRefreshKey} libraryId={libraryId!} exploreActive={exploreMode} onOpenExplore={() => navigate(`/${libraryId}/explore`)} />
                 </Box>
 
-                {/* Center: Masonry */}
+                {/* Center: Explore tag browser or the asset grid */}
                 <Box flex="1" overflow="hidden auto" p={{ base: "2", md: "4" }} position="relative" className="masonry-scroll-container">
-                    <MasonryGrid
-                        assets={assets}
-                        loading={loading}
-                        hasMore={hasMore}
-                        onLoadMore={handleLoadMore}
-                        onSelectAsset={handleSelectAsset}
-                        currentFolder={currentFolder}
-                        searchQuery={searchQuery}
-                        removedAssetIds={removedAssetMap}
-                        scrollToAssetId={scrollTargetId}
-                        onScrollTargetHandled={() => setScrollTargetId(null)}
-                    />
+                    {exploreMode ? (
+                        <TagExplore
+                            libraryId={libraryId!}
+                            searchQuery={searchQuery}
+                            onSelectTag={(value) => {
+                                const query = "tags:" + value
+                                setSearchQuery(query)
+                                setSelectedTags([value])
+                                setPage(1)
+                                navigate(`/${libraryId}?s=${encodeURIComponent(query)}`)
+                            }}
+                        />
+                    ) : (
+                        <MasonryGrid
+                            assets={assets}
+                            loading={loading}
+                            hasMore={hasMore}
+                            onLoadMore={handleLoadMore}
+                            onSelectAsset={handleSelectAsset}
+                            currentFolder={currentFolder}
+                            searchQuery={searchQuery}
+                            removedAssetIds={removedAssetMap}
+                            scrollToAssetId={scrollTargetId}
+                            onScrollTargetHandled={() => setScrollTargetId(null)}
+                            viewMode={viewMode}
+                            selectedAssetId={selectedAssetId}
+                            onBoost={handleBoost}
+                            onUndoBoost={handleUndoBoost}
+                        />
+                    )}
                 </Box>
 
                 {/* Right: Docked Sidebar (desktop only) */}
-                {selectedAssetId && <SidebarPanel assetId={selectedAssetId} onClose={handleCloseSidebar} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />}
+                {selectedAssetId && !exploreMode && <SidebarPanel assetId={selectedAssetId} onClose={handleCloseSidebar} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} boostPatch={boostPatch} onBoostChanged={applyBoostState} />}
             </Box>
 
             <AddAssetDialog
@@ -708,7 +896,7 @@ export function LibraryPage() {
                             </Drawer.Header>
                             <Drawer.Body>
                                 <DirectoryTree
-                                    currentFolder={currentFolder}
+                                    currentFolder={exploreMode ? EXPLORE_SELECTION_SENTINEL : currentFolder}
                                     onFolderChange={(folder) => {
                                         handleFolderChange(folder)
                                         setMobileTreeOpen(false)
@@ -716,6 +904,11 @@ export function LibraryPage() {
                                     onMoveAsset={handleMoveAsset}
                                     refreshKey={treeRefreshKey}
                                     libraryId={libraryId!}
+                                    exploreActive={exploreMode}
+                                    onOpenExplore={() => {
+                                        setMobileTreeOpen(false)
+                                        navigate(`/${libraryId}/explore`)
+                                    }}
                                 />
                             </Drawer.Body>
                         </Drawer.Content>
@@ -741,7 +934,7 @@ export function LibraryPage() {
                                 </HStack>
                             </Drawer.Header>
                             <Drawer.Body p="4">
-                                <Sidebar assetId={selectedAssetId} onClose={handleCloseSidebar} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} />
+                                <Sidebar assetId={selectedAssetId} onClose={handleCloseSidebar} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} boostPatch={boostPatch} onBoostChanged={applyBoostState} />
                             </Drawer.Body>
                         </Drawer.Content>
                     </Drawer.Positioner>
@@ -950,13 +1143,15 @@ export function LibraryPage() {
 }
 
 /** Sidebar panel with a left-edge drag handle for resizing. */
-function SidebarPanel({ assetId, onClose, toaster, onTagClick, selectedTags, onRefreshRequested }: {
+function SidebarPanel({ assetId, onClose, toaster, onTagClick, selectedTags, onRefreshRequested, boostPatch, onBoostChanged }: {
     assetId: string
     onClose: () => void
     toaster: CustomToaster
     onTagClick?: (value: string) => void
     selectedTags?: string[]
     onRefreshRequested?: (assetId?: string, reason?: 'deleted' | 'moved') => void
+    boostPatch?: { id: string; count: number; boostedToday: boolean } | null
+    onBoostChanged?: (assetId: string, boostCount: number, boostedToday: boolean) => void
 }) {
     const panelRef = useRef<HTMLDivElement>(null)
     const dragging = useRef(false)
@@ -1044,8 +1239,8 @@ function SidebarPanel({ assetId, onClose, toaster, onTagClick, selectedTags, onR
                 </svg>
             </IconButton>
 
-            <Box flex="1" overflow="auto" px="3" pt="14" pb="4">
-                <Sidebar assetId={assetId} onClose={onClose} toaster={toaster} onTagClick={onTagClick} selectedTags={selectedTags} onRefreshRequested={onRefreshRequested} />
+            <Box flex="1" minH="0" display="flex" flexDirection="column" overflow="hidden" px="3" pt="2" pb="4">
+                <Sidebar assetId={assetId} onClose={onClose} toaster={toaster} onTagClick={onTagClick} selectedTags={selectedTags} onRefreshRequested={onRefreshRequested} boostPatch={boostPatch} onBoostChanged={onBoostChanged} />
             </Box>
         </Box>
     )

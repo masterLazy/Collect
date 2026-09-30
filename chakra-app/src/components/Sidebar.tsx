@@ -10,7 +10,6 @@ import {
     IconButton,
     Image,
     Portal,
-    Separator,
     Skeleton,
     Stack,
     Text,
@@ -31,14 +30,10 @@ interface SidebarProps {
     selectedTags?: string[]
     onTagsSaved?: (updated: AssetDetailDto) => void
     onRefreshRequested?: (assetId?: string, reason?: 'deleted' | 'moved') => void
-}
-
-function XIcon() {
-    return (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M18 6L6 18M6 6l12 12" />
-        </svg>
-    )
+    /** Authoritative boost state for this asset after a boost made elsewhere. */
+    boostPatch?: { id: string; count: number; boostedToday: boolean } | null
+    /** Lets the grid update when boosts are reset from the sidebar. */
+    onBoostChanged?: (assetId: string, boostCount: number, boostedToday: boolean) => void
 }
 
 function CopyIcon() {
@@ -70,7 +65,178 @@ function TrashIcon() {
     )
 }
 
-export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, onTagsSaved, onRefreshRequested }: SidebarProps) {
+function MoveIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 7a2 2 0 0 1 2-2h3l2 2h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            <path d="M12 11v5" />
+            <path d="M10 13l2-2 2 2" />
+        </svg>
+    )
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+    return (
+        <svg
+            width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            style={{ transform: open ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s ease" }}
+        >
+            <polyline points="9 18 15 12 9 6" />
+        </svg>
+    )
+}
+
+function TagIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0l-7-7A2 2 0 0 1 3 12.2V5a2 2 0 0 1 2-2h7.2a2 2 0 0 1 1.4.6l7 7a2 2 0 0 1 0 2.8z" />
+            <circle cx="7.5" cy="7.5" r="1.2" />
+        </svg>
+    )
+}
+
+function PaletteIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9" />
+            <circle cx="9" cy="9" r="1.2" />
+            <circle cx="15" cy="9" r="1.2" />
+            <circle cx="9.5" cy="15" r="1.2" />
+            <circle cx="15" cy="15" r="1.2" />
+        </svg>
+    )
+}
+
+function InfoIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9" />
+            <line x1="12" y1="11" x2="12" y2="16" />
+            <line x1="12" y1="8" x2="12" y2="8.01" />
+        </svg>
+    )
+}
+
+function BoostIcon() {
+    return (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="19" x2="12" y2="5" />
+            <polyline points="5 12 12 5 19 12" />
+        </svg>
+    )
+}
+
+function ResetIcon() {
+    return (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="1 4 1 10 7 10" />
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+        </svg>
+    )
+}
+
+function LinkIcon() {
+    return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.8 1.7" />
+            <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.8-1.7" />
+        </svg>
+    )
+}
+
+type SectionKey = "tags" | "colors" | "details" | "path"
+
+const SECTION_STORAGE_KEY = "collect.sidebar.sections"
+
+function readSectionState(): Record<SectionKey, boolean> {
+    const defaults: Record<SectionKey, boolean> = { tags: true, colors: true, details: true, path: false }
+    try {
+        const raw = localStorage.getItem(SECTION_STORAGE_KEY)
+        if (!raw) return defaults
+        return { ...defaults, ...(JSON.parse(raw) as Partial<Record<SectionKey, boolean>>) }
+    } catch {
+        return defaults
+    }
+}
+
+/**
+ * One row of the sidebar's vertical menu. Used both for collapsible sections
+ * (with a chevron and `aria-expanded`) and for plain action rows.
+ */
+function MenuRow({ icon, label, onClick, expanded, trailing, tone }: {
+    icon: React.ReactNode
+    label: React.ReactNode
+    onClick: () => void
+    expanded?: boolean
+    trailing?: React.ReactNode
+    tone?: "danger"
+}) {
+    return (
+        <Box
+            as="button"
+            width="full"
+            display="flex"
+            alignItems="center"
+            gap="2"
+            px="2"
+            py="2"
+            borderRadius="md"
+            textAlign="left"
+            color={tone === "danger" ? "fg.error" : "fg"}
+            fontSize="sm"
+            cursor="pointer"
+            transition="background-color 0.12s"
+            _hover={{ bg: "bg.subtle" }}
+            _focusVisible={{ outline: "2px solid", outlineColor: "border.emphasized", outlineOffset: "-2px" }}
+            aria-expanded={expanded}
+            onClick={onClick}
+        >
+            <Box color={tone === "danger" ? "fg.error" : "fg.muted"} flexShrink="0" display="inline-flex">
+                {icon}
+            </Box>
+            <Box flex="1" minW="0" truncate>{label}</Box>
+            {trailing}
+            {expanded !== undefined && (
+                <Box color="fg.subtle" flexShrink="0" display="inline-flex">
+                    <ChevronIcon open={expanded} />
+                </Box>
+            )}
+        </Box>
+    )
+}
+
+/**
+ * Collapsible menu section: a vertical-menu row that reveals its content.
+ * Open state is owned by the sidebar so it can be persisted across sessions.
+ */
+function MenuSection({ icon, label, count, open, onToggle, children }: {
+    icon: React.ReactNode
+    label: string
+    count?: number
+    open: boolean
+    onToggle: () => void
+    children: React.ReactNode
+}) {
+    return (
+        <Box borderTopWidth="1px" borderColor="border" pt="1">
+            <MenuRow
+                icon={icon}
+                expanded={open}
+                onClick={onToggle}
+                label={
+                    <Text as="span" fontWeight="medium" fontSize="sm">{label}</Text>
+                }
+                trailing={count !== undefined ? (
+                    <Text as="span" fontSize="xs" color="fg.subtle">{count}</Text>
+                ) : undefined}
+            />
+            {open && <Box px="2" pb="3">{children}</Box>}
+        </Box>
+    )
+}
+
+export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, onTagsSaved, onRefreshRequested, boostPatch, onBoostChanged }: SidebarProps) {
     const { libraryId } = useParams()
     const [asset, setAsset] = useState<AssetDetailDto | null>(null)
     const [loading, setLoading] = useState(false)
@@ -127,6 +293,44 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
         setTags(newTags)
     }
 
+    // A boost made from the grid (or undone there) updates the count shown here
+    // without refetching the whole detail payload.
+    useEffect(() => {
+        if (!boostPatch) return
+        setAsset((prev) => (prev && prev.id === boostPatch.id
+            ? { ...prev, boostCount: boostPatch.count, boostedToday: boostPatch.boostedToday }
+            : prev))
+    }, [boostPatch])
+
+    const [resettingBoosts, setResettingBoosts] = useState(false)
+    const [resetBoostsConfirmOpen, setResetBoostsConfirmOpen] = useState(false)
+
+    const handleResetBoosts = async () => {
+        if (!asset || !libraryId) return
+        setResetBoostsConfirmOpen(false)
+        setResettingBoosts(true)
+        try {
+            const result = await api.resetBoosts(asset.id, libraryId)
+            setAsset((prev) => (prev ? { ...prev, boostCount: result.count, boostedToday: result.boostedToday } : prev))
+            onBoostChanged?.(asset.id, result.count, result.boostedToday)
+            toaster.create({
+                title: result.changed ? "Boosts reset" : "Nothing to reset",
+                description: result.changed
+                    ? "Every boost for this asset was cleared."
+                    : "This asset has no boosts.",
+                type: "info",
+            })
+        } catch {
+            toaster.create({
+                title: "Reset failed",
+                description: "Could not clear the boosts for this asset.",
+                type: "error",
+            })
+        } finally {
+            setResettingBoosts(false)
+        }
+    }
+
     const handleTagsSaved = (updated: AssetDetailDto) => {
         setAsset(updated)
         setTags(updated.tags)
@@ -138,6 +342,34 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     const [copiedImage, setCopiedImage] = useState(false)
     const [imageHovered, setImageHovered] = useState(false)
     const imageBoxRef = useRef<HTMLDivElement>(null)
+
+    // Vertical-menu section state, remembered across sessions.
+    const [sections, setSections] = useState<Record<SectionKey, boolean>>(readSectionState)
+    const toggleSection = useCallback((key: SectionKey) => {
+        setSections((prev) => {
+            const next = { ...prev, [key]: !prev[key] }
+            try {
+                localStorage.setItem(SECTION_STORAGE_KEY, JSON.stringify(next))
+            } catch {
+                // Storage unavailable (private mode) — the toggle still works for this session.
+            }
+            return next
+        })
+    }, [])
+
+    // Prefer the ~25 KB thumbnail over the original (often 1–2 MB): the preview
+    // is only ever rendered at panel width, and the viewer loads the full file.
+    const previewSrc = asset?.thumbnailUrl
+        ? API_BASE + asset.thumbnailUrl + "&t=" + encodeURIComponent(asset.lastModified ?? "")
+        : null
+
+    // A cached image can be complete before React's onLoad is attached, which
+    // would leave the preview stuck at opacity 0 behind its skeleton.
+    const previewImgRef = useRef<HTMLImageElement>(null)
+    useEffect(() => {
+        const el = previewImgRef.current
+        if (el && el.complete && el.naturalWidth > 0) setImageLoaded(true)
+    }, [previewSrc])
 
     const handleOpenFullscreen = () => {
         if (!assetId || !libraryId) return
@@ -257,339 +489,409 @@ export function Sidebar({ assetId, onClose, toaster, onTagClick, selectedTags, o
     }
 
     return (
-        <Stack gap="4">
-            {/* Preview image — collapse tall images */}
-            <Box
-                borderRadius="md"
-                overflow="hidden"
-                bg="bg.subtle"
-                border="1px solid"
-                borderColor="border"
-                position="relative"
-                onMouseEnter={() => setImageHovered(true)}
-                onMouseLeave={() => setImageHovered(false)}
-            >
+        <Stack gap="0" flex="1" minH="0" height="full">
+            <Box flex="1" minH="0" overflowY="auto">
+                {/* Preview — thumbnail quality; click through to the full-resolution viewer */}
                 <Box
-                    ref={imageBoxRef}
-                    position="relative"
-                    width="full"
-                    css={{ aspectRatio: asset && asset.width && asset.height ? String(asset.width / asset.height) : "4/3" }}
-                    maxH={asset && asset.height > asset.width && !imageExpanded ? "70vh" : undefined}
+                    borderRadius="md"
                     overflow="hidden"
+                    bg="bg.subtle"
+                    border="1px solid"
+                    borderColor="border"
+                    position="relative"
+                    onMouseEnter={() => setImageHovered(true)}
+                    onMouseLeave={() => setImageHovered(false)}
                 >
-                    {!imageLoaded && !error && (
-                        <Skeleton position="absolute" inset="0" width="full" height="full" />
-                    )}
-                    {error ? (
-                        <Box position="absolute" inset="0" display="flex" alignItems="center" justifyContent="center" bg="bg.muted">
-                            <Text color="fg.muted" fontSize="sm">Failed to load</Text>
+                    <Box
+                        ref={imageBoxRef}
+                        position="relative"
+                        width="full"
+                        cursor={asset ? "zoom-in" : "default"}
+                        css={{ aspectRatio: asset && asset.width && asset.height ? String(asset.width / asset.height) : "4/3" }}
+                        maxH={asset && asset.height > asset.width && !imageExpanded ? "52vh" : undefined}
+                        overflow="hidden"
+                        onClick={() => { if (asset) handleOpenFullscreen() }}
+                    >
+                        {(!asset || (!imageLoaded && !error)) && (
+                            <Skeleton position="absolute" inset="0" width="full" height="full" />
+                        )}
+                        {error ? (
+                            <Box position="absolute" inset="0" display="flex" alignItems="center" justifyContent="center" bg="bg.muted">
+                                <Text color="fg.muted" fontSize="sm">Failed to load</Text>
+                            </Box>
+                        ) : previewSrc ? (
+                            <Image
+                                ref={previewImgRef}
+                                src={previewSrc}
+                                alt={asset?.fileName ?? ""}
+                                width="full"
+                                height="full"
+                                objectFit="cover"
+                                objectPosition="top"
+                                draggable={false}
+                                opacity={imageLoaded ? 1 : 0}
+                                transition="opacity 0.3s"
+                                onLoad={() => setImageLoaded(true)}
+                                onError={() => { setImageLoaded(true); setError(true) }}
+                            />
+                        ) : null}
+                        {/* Preview actions — always visible, so touch and keyboard users can reach them */}
+                        {asset && imageLoaded && !error && (
+                            <HStack position="absolute" top="2" right="2" gap="1">
+                                <IconButton
+                                    size="xs"
+                                    variant="ghost"
+                                    bg="black/55"
+                                    color="white"
+                                    _hover={{ bg: "black/75" }}
+                                    opacity={imageHovered ? 1 : 0.9}
+                                    transition="opacity 0.15s"
+                                    aria-label="Copy image"
+                                    title="Copy image"
+                                    onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleCopyImage()
+                                    }}
+                                >
+                                    {copiedImage ? (
+                                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                            <polyline points="20 6 9 17 4 12" />
+                                        </svg>
+                                    ) : (
+                                        <CopyIcon />
+                                    )}
+                                </IconButton>
+                                <IconButton
+                                    size="xs"
+                                    variant="ghost"
+                                    bg="black/55"
+                                    color="white"
+                                    _hover={{ bg: "black/75" }}
+                                    opacity={imageHovered ? 1 : 0.9}
+                                    transition="opacity 0.15s"
+                                    aria-label="Open fullscreen"
+                                    title="Open fullscreen"
+                                    onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleOpenFullscreen()
+                                    }}
+                                >
+                                    <ExpandIcon />
+                                </IconButton>
+                            </HStack>
+                        )}
+                    </Box>
+                    {imageOverflows && !imageExpanded && (
+                        <Box
+                            position="absolute"
+                            bottom="0"
+                            left="0"
+                            right="0"
+                            textAlign="center"
+                            pb="3"
+                            pt="8"
+                            bgGradient="to-t"
+                            gradientFrom="bg"
+                            gradientTo="transparent"
+                            pointerEvents="none"
+                        >
+                            <Button
+                                size="xs"
+                                variant="ghost"
+                                colorPalette="accent"
+                                pointerEvents="auto"
+                                onClick={() => setImageExpanded(true)}
+                            >
+                                Show more
+                            </Button>
                         </Box>
-                    ) : (
-                        <Image
-                            src={API_BASE + "/api/assets/" + assetId + "/image?t=" + encodeURIComponent(asset?.lastModified ?? "") + "&libraryId=" + encodeURIComponent(libraryId!)}
-                            alt=""
-                            width="full"
-                            height="full"
-                            objectFit="cover"
-                            objectPosition="top"
-                            opacity={imageLoaded ? 1 : 0}
-                            transition="opacity 0.3s"
-                            onLoad={() => setImageLoaded(true)}
-                            onError={() => { setImageLoaded(true); setError(true) }}
-                        />
-                    )}
-                    {/* Image action buttons — top-right, visible on hover */}
-                    {asset && imageLoaded && !error && (
-                        <>
-                            <IconButton
-                                position="absolute"
-                                top="2"
-                                right="12"
-                                size="xs"
-                                variant="ghost"
-                                bg="black/40"
-                                color="white"
-                                _hover={{ bg: "black/60" }}
-                                opacity={imageHovered ? 1 : 0}
-                                transition="opacity 0.15s"
-                                aria-label="Copy image"
-                                onClick={(e) => {
-                                    e.stopPropagation()
-                                    handleCopyImage()
-                                }}
-                            >
-                                {copiedImage ? (
-                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                        <polyline points="20 6 9 17 4 12" />
-                                    </svg>
-                                ) : (
-                                    <CopyIcon />
-                                )}
-                            </IconButton>
-                            <IconButton
-                                position="absolute"
-                                top="2"
-                                right="2"
-                                size="xs"
-                                variant="ghost"
-                                bg="black/40"
-                                color="white"
-                                _hover={{ bg: "black/60" }}
-                                opacity={imageHovered ? 1 : 0}
-                                transition="opacity 0.15s"
-                                aria-label="View fullscreen"
-                                onClick={(e) => {
-                                    e.stopPropagation()
-                                    handleOpenFullscreen()
-                                }}
-                            >
-                                <ExpandIcon />
-                            </IconButton>
-                        </>
                     )}
                 </Box>
-                {imageOverflows && !imageExpanded && (
-                    <Box
-                        position="absolute"
-                        bottom="0"
-                        left="0"
-                        right="0"
-                        textAlign="center"
-                        pb="3"
-                        pt="8"
-                        bgGradient="to-t"
-                        gradientFrom="bg"
-                        gradientTo="transparent"
-                        pointerEvents="none"
-                    >
-                        <Button
-                            size="xs"
-                            variant="ghost"
-                            colorPalette="accent"
-                            pointerEvents="auto"
-                            onClick={() => setImageExpanded(true)}
-                        >
-                            Show more
-                        </Button>
-                    </Box>
+
+                {/* Loading skeleton */}
+                {loading && (
+                    <Stack gap="3" px="2" py="3">
+                        <Skeleton loading height="16px" width="60%" />
+                        <Skeleton loading height="16px" width="40%" />
+                        <Skeleton loading height="16px" width="50%" />
+                        <Skeleton loading height="16px" width="70%" />
+                    </Stack>
                 )}
-            </Box>
 
-            {/* Loading skeleton */}
-            {loading && (
-                <Stack gap="3">
-                    <Skeleton loading height="16px" width="60%" />
-                    <Skeleton loading height="16px" width="40%" />
-                    <Skeleton loading height="16px" width="50%" />
-                    <Skeleton loading height="16px" width="70%" />
-                </Stack>
-            )}
-
-            {/* Asset deleted state */}
-            {deleted && (
-                <Stack gap="4">
-                    <Box
-                        borderRadius="md"
-                        bg="bg.subtle"
-                        border="1px solid"
-                        borderColor="border"
-                        p="6"
-                        textAlign="center"
-                    >
-                        <Stack gap="2">
-                            <Text color="fg.muted" fontSize="lg">Asset deleted</Text>
-                            <Text color="fg.subtle" fontSize="sm">This asset has been removed from the library.</Text>
-                        </Stack>
-                    </Box>
-                    <Button size="xs" variant="outline" width="full" disabled>
-                        Move to...
-                    </Button>
-                    <Button size="xs" variant="outline" colorPalette="red" disabled>
-                        <TrashIcon />
-                        <Box as="span" ml="1">Delete</Box>
-                    </Button>
-                </Stack>
-            )}
-
-            {/* Asset details */}
-            {asset && !loading && !deleted && (
-                <>
-                    {/* Tags first — right after preview image */}
-                    <Box pt="1">
-                        <TagEditor
-                            tags={tags}
-                            assetId={asset.id}
-                            onTagsChange={handleTagsChange}
-                            onTagClick={onTagClick}
-                            selectedTags={selectedTags}
-                            onTagsSaved={handleTagsSaved}
-                            libraryId={libraryId!}
-                            toaster={toaster}
-                        />
-                    </Box>
-
-                    <Separator />
-
-                    {/* Palette bar - full width row above metadata */}
-                    {asset.palette && (
-                        <Box>
-                            <Text color="fg.muted" fontSize="sm" mb="1.5">Colors</Text>
-                            <PaletteBar palette={asset.palette} />
-                        </Box>
-                    )}
-
-                    {/* Metadata grid */}
-                    <Box
-                        display="grid"
-                        gridTemplateColumns="auto 1fr"
-                        gapX="3"
-                        gapY="1.5"
-                        fontSize="sm"
-                    >
-                        <Text color="fg.muted">Resolution</Text>
-                        <Text color="fg">{asset.width} × {asset.height}</Text>
-
-                        <Text color="fg.muted">Aspect Ratio</Text>
-                        <Text color="fg">
-                            {(() => {
-                                const ar = getClosestAspectRatio(asset.width, asset.height)
-                                if (!ar) return "—"
-                                return (
-                                    <>
-                                        <Text as="span">{ar.text}</Text>
-                                        {ar.label && (
-                                            <Badge size="sm" colorPalette="accent" variant="surface" fontWeight="medium" ml="1.5">{ar.label}</Badge>
-                                        )}
-                                        {ar.percent < 95 && (
-                                            <Text as="span" color="fg.subtle" fontSize="sm" ml="2">{ar.percent.toFixed(1)}%</Text>
-                                        )}
-                                    </>
-                                )
-                            })()}
-                        </Text>
-
-                        <Text color="fg.muted">Size</Text>
-                        <Text color="fg">{formatSize(asset.fileSize)}</Text>
-
-                        <Text color="fg.muted">Type</Text>
-                        <Text color="fg">{asset.mimeType}</Text>
-
-                        <Text color="fg.muted">Last Modified</Text>
-                        <Text color="fg">{formatDate(asset.lastModified ?? asset.importedAt)}</Text>
-                    </Box>
-
-                    {/* Path with copy icon */}
-                    <Box>
-                        <Text color="fg.muted" fontSize="xs" mb="1">Path</Text>
-                        <HStack
-                            bg="bg.subtle"
+                {/* Asset deleted state */}
+                {deleted && (
+                    <Stack gap="4">
+                        <Box
                             borderRadius="md"
+                            bg="bg.subtle"
                             border="1px solid"
                             borderColor="border"
-                            px="3"
-                            py="2"
-                            gap="2"
-                            _hover={{ borderColor: "border.accent" }}
-                            transition="border-color 0.15s"
+                            p="6"
+                            textAlign="center"
                         >
-                            <Text fontSize="xs" color="fg" flex="1" wordBreak="break-all" lineClamp={2}>
-                                {asset.relativePath}
-                            </Text>
-                            <CopyButton text={asset.relativePath} />
-                        </HStack>
-                    </Box>
+                            <Stack gap="2">
+                                <Text color="fg.muted" fontSize="lg">Asset deleted</Text>
+                                <Text color="fg.subtle" fontSize="sm">This asset has been removed from the library.</Text>
+                            </Stack>
+                        </Box>
+                        <Button size="xs" variant="outline" width="full" disabled>
+                            Move to...
+                        </Button>
+                        <Button size="xs" variant="outline" colorPalette="red" disabled>
+                            <TrashIcon />
+                            <Box as="span" ml="1">Delete</Box>
+                        </Button>
+                    </Stack>
+                )}
 
-                    <Separator />
+                {/* Asset details */}
+                {asset && !loading && !deleted && (
+                    <>
+                        {/* No filename row: tags are stored in the filename, so the Tags
+                        section below already carries the asset's identity. */}
 
-                    {/* Move to Directory */}
-                    <Button size="xs" variant="outline" width="full" onClick={handleOpenMoveDialog}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M5 19l14-4M5 5l14 4-14 4 14 4" />
-                        </svg>
-                        <Box as="span" ml="1">Move to...</Box>
-                    </Button>
+                        {/* Vertical menu */}
+                        <Box px="1">
+                            <MenuSection
+                                icon={<TagIcon />}
+                                label="Tags"
+                                count={tags.length}
+                                open={sections.tags}
+                                onToggle={() => toggleSection("tags")}
+                            >
+                                <TagEditor
+                                    tags={tags}
+                                    assetId={asset.id}
+                                    onTagsChange={handleTagsChange}
+                                    onTagClick={onTagClick}
+                                    selectedTags={selectedTags}
+                                    onTagsSaved={handleTagsSaved}
+                                    libraryId={libraryId!}
+                                    toaster={toaster}
+                                    hideLabel
+                                />
+                            </MenuSection>
 
-                    {/* Delete button with confirmation */}
-                    <Button
-                        size="xs"
-                        variant="outline"
-                        colorPalette="red"
-                        onClick={() => setDeleteConfirmOpen(true)}
-                    >
-                        <TrashIcon />
-                        <Box as="span" ml="1">Delete</Box>
-                    </Button>
+                            {asset.palette && (
+                                <MenuSection
+                                    icon={<PaletteIcon />}
+                                    label="Colors"
+                                    open={sections.colors}
+                                    onToggle={() => toggleSection("colors")}
+                                >
+                                    <PaletteBar palette={asset.palette} />
+                                </MenuSection>
+                            )}
 
-                    <Box pb="4" />
+                            <MenuSection
+                                icon={<InfoIcon />}
+                                label="Details"
+                                open={sections.details}
+                                onToggle={() => toggleSection("details")}
+                            >
+                                <Box
+                                    display="grid"
+                                    gridTemplateColumns="auto 1fr"
+                                    gapX="3"
+                                    gapY="1.5"
+                                    fontSize="sm"
+                                >
+                                    <Text color="fg.muted">Resolution</Text>
+                                    <Text color="fg">{asset.width} × {asset.height}</Text>
 
-                    {/* Move to Directory Dialog */}
-                    <Dialog.Root open={moveDialogOpen} onOpenChange={(e: { open: boolean }) => setMoveDialogOpen(e.open)}>
-                        <Portal>
-                            <Dialog.Backdrop />
-                            <Dialog.Positioner>
-                                <Dialog.Content>
-                                    <Dialog.Header>
-                                        <Dialog.Title>Move to Directory</Dialog.Title>
-                                    </Dialog.Header>
-                                    <Dialog.Body>
-                                        <DirectoryTreePicker
-                                            selectedPath={selectedMoveTarget}
-                                            onSelect={(path) => { setSelectedMoveTarget(path); setMoveTargetSelected(true) }}
-                                            libraryId={libraryId!}
-                                        />
-                                        {!selectedMoveTarget && (
-                                            <Text fontSize="xs" color="fg.subtle" mt="2">Select a folder to move the asset into</Text>
-                                        )}
-                                        {selectedMoveTarget && (
-                                            <Text fontSize="xs" color="fg.muted" mt="2">Target: {selectedMoveTarget}</Text>
-                                        )}
-                                    </Dialog.Body>
-                                    <Dialog.Footer>
-                                        <Button variant="outline" onClick={() => setMoveDialogOpen(false)}>
-                                            Cancel
-                                        </Button>
-                                        <Button
-                                            colorPalette="accent"
-                                            loading={moving}
-                                            disabled={!moveTargetSelected}
-                                            onClick={handleMoveAsset}
+                                    <Text color="fg.muted">Aspect Ratio</Text>
+                                    <Text color="fg">
+                                        {(() => {
+                                            const ar = getClosestAspectRatio(asset.width, asset.height)
+                                            if (!ar) return "—"
+                                            return (
+                                                <>
+                                                    <Text as="span">{ar.text}</Text>
+                                                    {ar.label && (
+                                                        <Badge size="sm" colorPalette="accent" variant="surface" fontWeight="medium" ml="1.5">{ar.label}</Badge>
+                                                    )}
+                                                    {ar.percent < 95 && (
+                                                        <Text as="span" color="fg.subtle" fontSize="sm" ml="2">{ar.percent.toFixed(1)}%</Text>
+                                                    )}
+                                                </>
+                                            )
+                                        })()}
+                                    </Text>
+
+                                    <Text color="fg.muted">Size</Text>
+                                    <Text color="fg">{formatSize(asset.fileSize)}</Text>
+
+                                    <Text color="fg.muted">Type</Text>
+                                    <Text color="fg">{asset.mimeType}</Text>
+
+                                    <Text color="fg.muted">Last Modified</Text>
+                                    <Text color="fg">{formatDate(asset.lastModified ?? asset.importedAt)}</Text>
+
+                                    <Text color="fg.muted">Boosts</Text>
+                                    <HStack gap="1.5">
+                                        <Box
+                                            display="inline-flex"
+                                            alignItems="center"
+                                            gap="1"
+                                            color={asset.boostCount > 0 ? "blue.500" : "fg.subtle"}
+                                            _dark={{ color: asset.boostCount > 0 ? "blue.300" : "fg.subtle" }}
                                         >
-                                            Move
-                                        </Button>
-                                    </Dialog.Footer>
-                                </Dialog.Content>
-                            </Dialog.Positioner>
-                        </Portal>
-                    </Dialog.Root>
+                                            <BoostIcon />
+                                            <Text as="span" fontWeight="medium">{asset.boostCount}</Text>
+                                        </Box>
+                                        {asset.boostedToday && (
+                                            <Badge size="sm" colorPalette="blue" variant="surface" fontWeight="medium">today</Badge>
+                                        )}
+                                        {asset.boostCount > 0 && (
+                                            <IconButton
+                                                size="2xs"
+                                                variant="ghost"
+                                                colorPalette="gray"
+                                                loading={resettingBoosts}
+                                                onClick={() => setResetBoostsConfirmOpen(true)}
+                                                aria-label="Reset boosts"
+                                                title="Reset all boosts for this asset"
+                                            >
+                                                <ResetIcon />
+                                            </IconButton>
+                                        )}
+                                    </HStack>
+                                </Box>
+                            </MenuSection>
+                        </Box>
 
-                    {/* Delete confirmation dialog */}
-                    <Dialog.Root open={deleteConfirmOpen} onOpenChange={(e: { open: boolean }) => setDeleteConfirmOpen(e.open)}>
-                        <Portal>
-                            <Dialog.Backdrop />
-                            <Dialog.Positioner>
-                                <Dialog.Content>
-                                    <Dialog.Header>
-                                        <Dialog.Title>Delete Asset</Dialog.Title>
-                                    </Dialog.Header>
-                                    <Dialog.Body>
-                                        <Text fontSize="sm" color="fg">
-                                            Are you sure you want to delete this asset? This action cannot be undone.
-                                        </Text>
-                                    </Dialog.Body>
-                                    <Dialog.Footer>
-                                        <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>
-                                            Cancel
-                                        </Button>
-                                        <Button colorPalette="red" onClick={handleDelete}>
-                                            Delete
-                                        </Button>
-                                    </Dialog.Footer>
-                                </Dialog.Content>
-                            </Dialog.Positioner>
-                        </Portal>
-                    </Dialog.Root>
-                </>
+                        <Box px="1">
+                            <MenuSection
+                                icon={<LinkIcon />}
+                                label="Path"
+                                open={sections.path}
+                                onToggle={() => toggleSection("path")}
+                            >
+                                <HStack
+                                    bg="bg.subtle"
+                                    borderRadius="md"
+                                    border="1px solid"
+                                    borderColor="border"
+                                    px="3"
+                                    py="2"
+                                    gap="2"
+                                >
+                                    <Text fontSize="xs" color="fg" flex="1" wordBreak="break-all" lineClamp={3}>
+                                        {asset.relativePath}
+                                    </Text>
+                                    <CopyButton text={asset.relativePath} />
+                                </HStack>
+                            </MenuSection>
+                        </Box>
+
+                    </>
+                )}
+
+            </Box>
+
+            {/* Actions — pinned below the scroll area. Copy image / fullscreen already
+                live on the preview above, so only the non-duplicated actions stay here. */}
+            {asset && !loading && !deleted && (
+                <Stack gap="0.5" px="1" py="1" borderTopWidth="1px" borderColor="border" flexShrink="0">
+                    <MenuRow icon={<MoveIcon />} label="Move to…" onClick={handleOpenMoveDialog} />
+                    <MenuRow icon={<TrashIcon />} label="Delete" tone="danger" onClick={() => setDeleteConfirmOpen(true)} />
+                </Stack>
             )}
+
+            {/* Move to Directory Dialog */}
+            <Dialog.Root open={moveDialogOpen} onOpenChange={(e: { open: boolean }) => setMoveDialogOpen(e.open)}>
+                <Portal>
+                    <Dialog.Backdrop />
+                    <Dialog.Positioner>
+                        <Dialog.Content>
+                            <Dialog.Header>
+                                <Dialog.Title>Move to Directory</Dialog.Title>
+                            </Dialog.Header>
+                            <Dialog.Body>
+                                <DirectoryTreePicker
+                                    selectedPath={selectedMoveTarget}
+                                    onSelect={(path) => { setSelectedMoveTarget(path); setMoveTargetSelected(true) }}
+                                    libraryId={libraryId!}
+                                />
+                                {!selectedMoveTarget && (
+                                    <Text fontSize="xs" color="fg.subtle" mt="2">Select a folder to move the asset into</Text>
+                                )}
+                                {selectedMoveTarget && (
+                                    <Text fontSize="xs" color="fg.muted" mt="2">Target: {selectedMoveTarget}</Text>
+                                )}
+                            </Dialog.Body>
+                            <Dialog.Footer>
+                                <Button variant="outline" onClick={() => setMoveDialogOpen(false)}>
+                                    Cancel
+                                </Button>
+                                <Button
+                                    colorPalette="accent"
+                                    loading={moving}
+                                    disabled={!moveTargetSelected}
+                                    onClick={handleMoveAsset}
+                                >
+                                    Move
+                                </Button>
+                            </Dialog.Footer>
+                        </Dialog.Content>
+                    </Dialog.Positioner>
+                </Portal>
+            </Dialog.Root>
+
+            {/* Delete confirmation dialog */}
+            <Dialog.Root open={deleteConfirmOpen} onOpenChange={(e: { open: boolean }) => setDeleteConfirmOpen(e.open)}>
+                <Portal>
+                    <Dialog.Backdrop />
+                    <Dialog.Positioner>
+                        <Dialog.Content>
+                            <Dialog.Header>
+                                <Dialog.Title>Delete Asset</Dialog.Title>
+                            </Dialog.Header>
+                            <Dialog.Body>
+                                <Text fontSize="sm" color="fg">
+                                    Are you sure you want to delete this asset? This action cannot be undone.
+                                </Text>
+                            </Dialog.Body>
+                            <Dialog.Footer>
+                                <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>
+                                    Cancel
+                                </Button>
+                                <Button colorPalette="red" onClick={handleDelete}>
+                                    Delete
+                                </Button>
+                            </Dialog.Footer>
+                        </Dialog.Content>
+                    </Dialog.Positioner>
+                </Portal>
+            </Dialog.Root>
+
+            {/* Reset boosts confirmation dialog */}
+            <Dialog.Root open={resetBoostsConfirmOpen} onOpenChange={(e: { open: boolean }) => setResetBoostsConfirmOpen(e.open)}>
+                <Portal>
+                    <Dialog.Backdrop />
+                    <Dialog.Positioner>
+                        <Dialog.Content>
+                            <Dialog.Header>
+                                <Dialog.Title>Reset Boosts</Dialog.Title>
+                            </Dialog.Header>
+                            <Dialog.Body>
+                                <Text fontSize="sm" color="fg">
+                                    Clear all {asset?.boostCount ?? 0} boost{(asset?.boostCount ?? 0) === 1 ? "" : "s"} for this asset?
+                                    This cannot be undone.
+                                </Text>
+                            </Dialog.Body>
+                            <Dialog.Footer>
+                                <Button variant="outline" onClick={() => setResetBoostsConfirmOpen(false)}>
+                                    Cancel
+                                </Button>
+                                <Button colorPalette="red" loading={resettingBoosts} onClick={handleResetBoosts}>
+                                    Reset
+                                </Button>
+                            </Dialog.Footer>
+                        </Dialog.Content>
+                    </Dialog.Positioner>
+                </Portal>
+            </Dialog.Root>
         </Stack>
     )
 }

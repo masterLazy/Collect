@@ -56,13 +56,21 @@ public class AssetsController : ControllerBase
     /// subfolders=false: only assets directly in the specified folder.
     /// folder=__root__: assets in the library root (not in any subdirectory).
     /// </summary>
+    /// <summary>
+    /// GET /api/assets?page=1&amp;size=30&amp;sort=newest|oldest|name|size|random|boosts&amp;seed=12345
+    /// Page through assets. subfolders=true (default): include assets in subdirectories recursively.
+    /// subfolders=false: only assets directly in the specified folder.
+    /// folder=__root__: assets in the library root (not in any subdirectory).
+    /// seed: makes sort=random deterministic so paging cannot repeat or skip assets.
+    /// </summary>
     [HttpGet]
     public async Task<IActionResult> GetAssets(
         [FromQuery] int page = 1,
         [FromQuery] int size = 30,
         [FromQuery] string? folder = null,
         [FromQuery] string sort = "newest",
-        [FromQuery] bool subfolders = true)
+        [FromQuery] bool subfolders = true,
+        [FromQuery] int? seed = null)
     {
         // Strict mode: a name-encrypted library that is locked must not reveal real names/tags.
         if (_libraryService.IsEncryptedLibrary() && _libraryService.EncryptsFileNames() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
@@ -71,7 +79,7 @@ public class AssetsController : ControllerBase
         page = Math.Max(1, page);
         size = Math.Clamp(size, 1, 100);
 
-        var result = await _assetService.GetAssetsAsync(page, size, sort, folder, subfolders);
+        var result = await _assetService.GetAssetsAsync(page, size, sort, folder, subfolders, seed);
         return Ok(result);
     }
 
@@ -293,6 +301,59 @@ public class AssetsController : ControllerBase
         {
             return StatusCode(500, new { error = "Failed to process clipboard image.", detail = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// POST /api/assets/{id}/boost
+    /// Boost (up-vote) an asset. Allowed once per asset per local day; a repeat
+    /// call in the same day returns the current count with alreadyBoosted=true.
+    /// </summary>
+    [HttpPost("{id}/boost")]
+    public async Task<IActionResult> BoostAsset(string id)
+    {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
+        var result = await _assetService.BoostAssetAsync(id);
+        if (result is null)
+            return NotFound(new { error = $"Asset '{id}' not found." });
+
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// POST /api/assets/{id}/boost/undo
+    /// Take back today's boost: count drops by one and the once-per-day limit is
+    /// cleared, so the asset can be boosted again today.
+    /// </summary>
+    [HttpPost("{id}/boost/undo")]
+    public async Task<IActionResult> UndoBoost(string id)
+    {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
+        var result = await _assetService.UndoBoostAsync(id);
+        if (result is null)
+            return NotFound(new { error = $"Asset '{id}' not found." });
+
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// DELETE /api/assets/{id}/boost
+    /// Clear every boost for an asset (count back to zero).
+    /// </summary>
+    [HttpDelete("{id}/boost")]
+    public async Task<IActionResult> ResetBoosts(string id)
+    {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
+        var result = await _assetService.ResetBoostCountAsync(id);
+        if (result is null)
+            return NotFound(new { error = $"Asset '{id}' not found." });
+
+        return Ok(result);
     }
 
     /// <summary>

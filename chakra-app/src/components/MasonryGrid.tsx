@@ -25,16 +25,25 @@ interface MasonryGridProps {
     removedAssetIds?: Map<string, 'deleted' | 'moved'>
     scrollToAssetId?: string | null
     onScrollTargetHandled?: () => void
+    /** "masonry" keeps each image's aspect ratio, "grid" uses uniform square cells. */
+    viewMode?: "masonry" | "grid"
+    /** Asset currently shown in the sidebar — gets a selection ring. */
+    selectedAssetId?: string | null
+    /** Boost (up-vote) an asset from its card. */
+    onBoost?: (id: string) => void
+    /** Take back today's boost from the card. */
+    onUndoBoost?: (id: string) => void
 }
 
 // Column width adaptation.
 // The target column width scales smoothly between 160px (small screens) and
-// 280px (wide screens), linearly interpolated across the container width. This
+// 250px (wide screens), linearly interpolated across the container width. This
 // keeps the column count a monotonic (never decreasing while widening) function
 // of width — the old discrete breakpoints made the grid drop from 3 back to 2
 // columns when crossing a breakpoint during a resize.
+// 250px is tuned so a 1080p screen (1920px, folder tree open) lands on 6 columns.
 const MIN_COL_WIDTH = 160
-const MAX_COL_WIDTH = 280
+const MAX_COL_WIDTH = 250
 const NARROW_WIDTH = 480
 const WIDE_WIDTH = 1400
 
@@ -112,7 +121,7 @@ function createDragGhost(thumbSrc: string | null): HTMLDivElement | null {
     return ghost
 }
 
-export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsset, currentFolder, searchQuery, removedAssetIds, scrollToAssetId, onScrollTargetHandled }: MasonryGridProps) {
+export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsset, currentFolder, searchQuery, removedAssetIds, scrollToAssetId, onScrollTargetHandled, viewMode = "masonry", selectedAssetId, onBoost, onUndoBoost }: MasonryGridProps) {
     const sentinelRef = useRef<HTMLDivElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
     const loadingRef = useRef(loading)
@@ -276,6 +285,38 @@ export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsse
         removeDragGhost()
     }
 
+    // Shared card renderer — masonry and grid differ only in their layout container.
+    const renderCard = (asset: AssetDto) => (
+        <Box key={asset.id} id={`asset-${asset.id}`} position="relative">
+            <AssetCard
+                asset={asset}
+                apiBase={API_BASE}
+                onClick={() => onSelectAsset(asset.id)}
+                onDragStart={handleCardDragStart(asset.id)}
+                onDragEnd={handleCardDragEnd}
+                uniform={viewMode === "grid"}
+                selected={selectedAssetId === asset.id}
+                onBoost={onBoost}
+                onUndoBoost={onUndoBoost}
+                removed={removedAssetIds?.has(asset.id) ? { reason: removedAssetIds.get(asset.id)! as 'deleted' | 'moved' } : undefined}
+            />
+            {/* Deep-link highlight ring — fades after ~2s */}
+            {highlightId === asset.id && (
+                <Box
+                    position="absolute"
+                    inset="0"
+                    borderRadius="md"
+                    border="2px solid"
+                    borderColor="fg"
+                    pointerEvents="none"
+                    zIndex="1"
+                    opacity={highlightVisible ? 1 : 0}
+                    transition="opacity 0.5s ease"
+                />
+            )}
+        </Box>
+    )
+
     return (
         <Box ref={containerRef} onDragOver={handleDragOver} onDrop={handleDrop}>
             {/* Initial loading spinner */}
@@ -304,42 +345,28 @@ export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsse
                 </Center>
             ) : (
                 <>
-                    <Box
-                        display="flex"
-                        gap={`${gap}px`}
-                        alignItems="flex-start"
-                    >
-                        {columns.map((col, i) => (
-                            <Box key={i} flex="1" minW="0" display="flex" flexDirection="column" gap="16px">
-                                {col.map((asset) => (
-                                    <Box key={asset.id} id={`asset-${asset.id}`} position="relative">
-                                        <AssetCard
-                                            asset={asset}
-                                            apiBase={API_BASE}
-                                            onClick={() => onSelectAsset(asset.id)}
-                                            onDragStart={handleCardDragStart(asset.id)}
-                                            onDragEnd={handleCardDragEnd}
-                                            removed={removedAssetIds?.has(asset.id) ? { reason: removedAssetIds.get(asset.id)! as 'deleted' | 'moved' } : undefined}
-                                        />
-                                        {/* Deep-link highlight ring — fades after ~2s */}
-                                        {highlightId === asset.id && (
-                                            <Box
-                                                position="absolute"
-                                                inset="0"
-                                                borderRadius="md"
-                                                border="2px solid"
-                                                borderColor="accent.solid"
-                                                pointerEvents="none"
-                                                zIndex="1"
-                                                opacity={highlightVisible ? 1 : 0}
-                                                transition="opacity 0.5s ease"
-                                            />
-                                        )}
-                                    </Box>
-                                ))}
-                            </Box>
-                        ))}
-                    </Box>
+                    {viewMode === "grid" ? (
+                        /* Uniform grid — equal cells, images cropped to fill */
+                        <Box
+                            display="grid"
+                            gap={`${gap}px`}
+                            gridTemplateColumns={`repeat(auto-fill, minmax(${Math.max(140, Math.round(targetColumnWidth))}px, 1fr))`}
+                        >
+                            {assets.map(renderCard)}
+                        </Box>
+                    ) : (
+                        <Box
+                            display="flex"
+                            gap={`${gap}px`}
+                            alignItems="flex-start"
+                        >
+                            {columns.map((col, i) => (
+                                <Box key={i} flex="1" minW="0" display="flex" flexDirection="column" gap="16px">
+                                    {col.map(renderCard)}
+                                </Box>
+                            ))}
+                        </Box>
+                    )}
 
                     {/* Sentinel for infinite scroll */}
                     <Box ref={sentinelRef} width="full" py="4" display={showSentinel ? "block" : "none"}>

@@ -22,6 +22,10 @@ export interface AssetDto {
     thumbnailUrl: string;
     importedAt: string;
     lastModified: string | null;
+    /** Total number of boosts (up-votes) this asset has received. */
+    boostCount: number;
+    /** True when today's boost for this asset has already been used. */
+    boostedToday: boolean;
 }
 
 export interface AssetDetailDto {
@@ -36,6 +40,25 @@ export interface AssetDetailDto {
     palette?: ColorPalette | null;
     importedAt: string;
     lastModified: string | null;
+    /** Server-relative URL including the libraryId query parameter. */
+    thumbnailUrl?: string;
+    /** Server-relative URL including the libraryId query parameter. */
+    imageUrl?: string;
+    /** Total number of boosts (up-votes) this asset has received. */
+    boostCount: number;
+    /** True when today's boost for this asset has already been used. */
+    boostedToday: boolean;
+}
+
+/** Result of a boost (up-vote) request for a single asset. */
+export interface BoostResultDto {
+    assetId: string;
+    count: number;
+    boostedToday: boolean;
+    /** True when the asset had already been boosted today, so the count did not change. */
+    alreadyBoosted: boolean;
+    /** True when the stored boost state actually changed (false for a no-op call). */
+    changed: boolean;
 }
 
 export interface PaginatedResponse<T> {
@@ -56,6 +79,28 @@ export interface TagGroupsResponse {
     totalGroups: number;
 }
 
+/** One tag plus a randomly sampled asset, used by the Explore view. */
+export interface TagExploreItemDto {
+    value: string;
+    count: number;
+    assetId: string;
+    /** Server-relative URL that already carries the libraryId query parameter. */
+    thumbnailUrl: string;
+    width: number;
+    height: number;
+}
+
+export interface TagExploreGroupDto {
+    type: string | null;
+    tags: TagExploreItemDto[];
+}
+
+export interface TagExploreResponse {
+    groups: TagExploreGroupDto[];
+    totalTags: number;
+    truncated: boolean;
+}
+
 export interface LibraryInfo {
     id: string;
     name: string;
@@ -64,6 +109,10 @@ export interface LibraryInfo {
     categoryOrder?: string[];
     isEncrypted?: boolean;
     encryptFileNames?: boolean;
+    /** Persisted gallery layout: "masonry" | "grid". */
+    viewMode?: string | null;
+    /** Persisted sort order: "newest" | "name" | "random" | "boosts". */
+    sortMode?: string | null;
 }
 
 export interface DirectoryNode {

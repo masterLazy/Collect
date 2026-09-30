@@ -14,4 +14,10 @@ public class AssetDto
     public string ThumbnailUrl { get; set; } = string.Empty;
     public DateTime ImportedAt { get; set; }
     public DateTime? LastModified { get; set; }
+
+    /// <summary>How many times this asset has been boosted (up-voted).</summary>
+    public int BoostCount { get; set; }
+
+    /// <summary>True when the asset has already received its boost for today.</summary>
+    public bool BoostedToday { get; set; }
 }

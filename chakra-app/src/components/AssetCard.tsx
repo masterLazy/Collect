@@ -9,6 +9,23 @@ interface AssetCardProps {
     onDragStart?: (e: React.DragEvent) => void
     onDragEnd?: (e: React.DragEvent) => void
     removed?: { reason: 'deleted' | 'moved' }
+    /** Uniform square cell (grid view) instead of the natural aspect ratio (masonry). */
+    uniform?: boolean
+    /** Marks this card as the asset currently shown in the sidebar. */
+    selected?: boolean
+    /** Boost (up-vote) the asset. Omitted for cards that cannot be boosted. */
+    onBoost?: (id: string) => void
+    /** Take back today's boost (count −1, can be boosted again today). */
+    onUndoBoost?: (id: string) => void
+}
+
+function BoostIcon() {
+    return (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="19" x2="12" y2="5" />
+            <polyline points="5 12 12 5 19 12" />
+        </svg>
+    )
 }
 
 function BrokenImageIcon() {
@@ -31,19 +48,35 @@ function DragHandleIcon() {
     )
 }
 
-export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, removed }: AssetCardProps) {
+export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, removed, uniform, selected, onBoost, onUndoBoost }: AssetCardProps) {
     const [loaded, setLoaded] = useState(false)
     const [error, setError] = useState(false)
     const [hovered, setHovered] = useState(false)
     const isLandscape = asset.width > asset.height
-    const aspectRatio = isLandscape ? 4 / 3 : (asset.width && asset.height ? asset.width / asset.height : 4 / 3)
+    const aspectRatio = uniform ? 1 : (isLandscape ? 4 / 3 : (asset.width && asset.height ? asset.width / asset.height : 4 / 3))
 
     const isRemoved = !!removed
+    const boostedToday = !!asset.boostedToday
+    const boostCount = asset.boostCount ?? 0
+    // Un-boosted assets stay visually quiet: their pill only appears while the
+    // card is hovered (or the pill itself is focused).
+    const boostRevealed = boostedToday || boostCount > 0 || hovered
+    const canBoost = !!(onBoost || onUndoBoost)
 
     return (
         <Box
             cursor={isRemoved ? "default" : "pointer"}
             onClick={isRemoved ? undefined : onClick}
+            onKeyDown={isRemoved ? undefined : (e: React.KeyboardEvent) => {
+                if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault()
+                    onClick()
+                }
+            }}
+            role={isRemoved ? undefined : "button"}
+            tabIndex={isRemoved ? undefined : 0}
+            aria-label={asset.fileName}
+            title={asset.fileName}
             borderRadius="md"
             overflow="hidden"
             bg="bg.subtle"
@@ -51,6 +84,7 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, rem
             borderColor="border"
             transition="all 0.2s"
             _hover={isRemoved ? {} : { transform: "translateY(-2px)", shadow: "md" }}
+            _focusVisible={{ outline: "2px solid", outlineColor: "border.emphasized", outlineOffset: "2px" }}
             onMouseEnter={isRemoved ? undefined : () => setHovered(true)}
             onMouseLeave={isRemoved ? undefined : () => setHovered(false)}
             position="relative"
@@ -138,6 +172,58 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, rem
                 </Box>
             )}
 
+            {/* Boost pill — bottom-right corner. White outline on a translucent dark
+                scrim while today's boost is available; solid blue once it has been
+                given. Hidden until hover for assets that were never boosted. */}
+            {!isRemoved && canBoost && (
+                <Box
+                    as="button"
+                    position="absolute"
+                    bottom="1.5"
+                    right="1.5"
+                    display="flex"
+                    alignItems="center"
+                    gap="1"
+                    px="2"
+                    height="24px"
+                    borderRadius="full"
+                    border="2px solid"
+                    bg={boostedToday ? "blue.600" : "black/55"}
+                    borderColor={boostedToday ? "blue.600" : "white"}
+                    color="white"
+                    fontSize="xs"
+                    fontWeight="bold"
+                    lineHeight="1"
+                    cursor="pointer"
+                    boxShadow="sm"
+                    opacity={boostedToday ? 1 : (boostRevealed ? 0.8 : 0)}
+                    pointerEvents={boostRevealed ? "auto" : "none"}
+                    transition="opacity 0.2s, background 0.2s, border-color 0.2s"
+                    _hover={boostedToday
+                        ? { bg: "blue.500", borderColor: "blue.500", opacity: 1 }
+                        : { bg: "black/75", opacity: 1 }}
+                    _focusVisible={{ opacity: 1, outline: "2px solid", outlineColor: "white", outlineOffset: "2px" }}
+                    onClick={(e: React.MouseEvent) => {
+                        e.stopPropagation()
+                        if (boostedToday) onUndoBoost?.(asset.id)
+                        else onBoost?.(asset.id)
+                    }}
+                    onKeyDown={(e: React.KeyboardEvent) => e.stopPropagation()}
+                    aria-label={boostedToday ? `Undo today's boost (${boostCount})` : "Boost this asset"}
+                    title={
+                        boostedToday
+                            ? `Boosted today \u00b7 click to undo (${boostCount} boost${boostCount === 1 ? "" : "s"})`
+                            : boostCount > 0
+                                ? `Boost \u00b7 ${boostCount} boost${boostCount === 1 ? "" : "s"} so far`
+                                : "Boost \u00b7 one per day"
+                    }
+                    zIndex="1"
+                >
+                    <BoostIcon />
+                    {boostCount > 0 && <Box as="span">{boostCount}</Box>}
+                </Box>
+            )}
+
             {/* Removed overlay — same style as Failed to load but with blur+overlay */}
             {isRemoved && (
                 <Box
@@ -156,6 +242,19 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, rem
                     <BrokenImageIcon />
                     <Box>{removed!.reason === 'deleted' ? 'Deleted' : 'Moved'}</Box>
                 </Box>
+            )}
+
+            {/* Selected ring — the sidebar shows this asset, so mark it in the grid */}
+            {selected && !isRemoved && (
+                <Box
+                    position="absolute"
+                    inset="0"
+                    border="2px solid"
+                    borderColor="fg"
+                    borderRadius="md"
+                    pointerEvents="none"
+                    zIndex="3"
+                />
             )}
         </Box>
     )

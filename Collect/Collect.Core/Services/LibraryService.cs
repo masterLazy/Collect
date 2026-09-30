@@ -953,6 +953,34 @@ public class LibraryService : ILibraryService
         }
     }
 
+    public async Task SetPreferencesAsync(string? viewMode, string? sortMode)
+    {
+        await _fileLock.WaitAsync();
+        try
+        {
+            var infoPath = GetInfoPath();
+            if (infoPath is null)
+                throw new InvalidOperationException("Library not initialized.");
+
+            if (!File.Exists(infoPath))
+                throw new InvalidOperationException("Library metadata file not found.");
+
+            var json = await ReadTextFileSafelyAsync(infoPath);
+            var info = JsonSerializer.Deserialize<LibraryInfo>(json, JsonOptions);
+            if (info is null)
+                throw new InvalidOperationException("Failed to read library metadata.");
+
+            if (viewMode is not null) info.ViewMode = viewMode;
+            if (sortMode is not null) info.SortMode = sortMode;
+
+            await WriteTextFileSafelyAsync(infoPath, JsonSerializer.Serialize(info, JsonOptions));
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
+    }
+
     public async Task UpdateLibraryInfoAsync(Action<LibraryInfo> updateAction)
     {
         await _fileLock.WaitAsync();

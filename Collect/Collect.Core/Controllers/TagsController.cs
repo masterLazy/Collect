@@ -34,6 +34,24 @@ public class TagsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>
+    /// GET /api/tags/explore?maxTags=400&amp;search=...
+    /// Every tag grouped by type, each carrying a randomly sampled asset, for the
+    /// Explore page. Samples are re-drawn on every request, so calling it again
+    /// reshuffles the tiles.
+    /// </summary>
+    [HttpGet("explore")]
+    public async Task<IActionResult> GetExploreTags(
+        [FromQuery] int maxTags = 400,
+        [FromQuery] string? search = null)
+    {
+        if (_libraryService.IsEncryptedLibrary() && _libraryService.EncryptsFileNames() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
+        var result = await _tagService.GetTagExploreAsync(maxTags, search);
+        return Ok(result);
+    }
+
     private string? GetUnlockToken() =>
         Request.Headers.TryGetValue("X-Unlock-Token", out var values) ? values.FirstOrDefault() : null;
 }

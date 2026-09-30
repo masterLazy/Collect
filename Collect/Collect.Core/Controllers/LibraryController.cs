@@ -183,6 +183,8 @@ public class LibraryController : ControllerBase
             info.CreatedAt,
             info.AssetCount,
             info.CategoryOrder,
+            info.ViewMode,
+            info.SortMode,
             info.IsEncrypted,
             info.EncryptFileNames
         };
@@ -295,6 +297,28 @@ public class LibraryController : ControllerBase
     }
 
     /// <summary>
+    /// POST /api/library/preferences
+    /// Persist the library's view preferences (gallery layout and sort order).
+    /// Body: { "viewMode": "masonry"|"grid", "sortMode": "newest"|"name"|"random"|"boosts" }
+    /// Omitted fields are left unchanged.
+    /// </summary>
+    [HttpPost("preferences")]
+    public async Task<IActionResult> SetPreferences([FromBody] PreferencesRequest request)
+    {
+        if (_libraryService.IsEncryptedLibrary() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
+        if (request.ViewMode is not null && request.ViewMode is not ("masonry" or "grid"))
+            return BadRequest(new { error = "viewMode must be 'masonry' or 'grid'." });
+
+        if (request.SortMode is not null && request.SortMode is not ("newest" or "name" or "random" or "boosts"))
+            return BadRequest(new { error = "sortMode must be 'newest', 'name', 'random' or 'boosts'." });
+
+        await _libraryService.SetPreferencesAsync(request.ViewMode, request.SortMode);
+        return Ok(new { success = true });
+    }
+
+    /// <summary>
     /// GET /api/library/recent
     /// Get the list of recent libraries from persistent storage.
     /// </summary>
@@ -389,6 +413,15 @@ public class DeleteDirectoryRequest
 public class CategoryOrderRequest
 {
     public List<string> Order { get; set; } = new();
+}
+
+public class PreferencesRequest
+{
+    /// <summary>"masonry" or "grid"; null leaves the stored value unchanged.</summary>
+    public string? ViewMode { get; set; }
+
+    /// <summary>"newest", "name", "random" or "boosts"; null leaves the stored value unchanged.</summary>
+    public string? SortMode { get; set; }
 }
 
 public class DecryptRequest

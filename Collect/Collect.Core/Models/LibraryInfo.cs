@@ -19,6 +19,17 @@ public class LibraryInfo
     public List<string>? CategoryOrder { get; set; }
 
     /// <summary>
+    /// Preferred gallery layout for this library: "masonry" or "grid".
+    /// Persisted so the choice follows the library rather than the browser.
+    /// </summary>
+    public string? ViewMode { get; set; }
+
+    /// <summary>
+    /// Preferred asset sort order for this library: "newest", "name", "random" or "boosts".
+    /// </summary>
+    public string? SortMode { get; set; }
+
+    /// <summary>
     /// Whether this library uses encryption (files encrypted at rest with AES-256-GCM).
     /// </summary>
     public bool IsEncrypted { get; set; }

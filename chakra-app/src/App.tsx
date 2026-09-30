@@ -122,6 +122,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/:libraryId/view/:assetId" element={<ImageViewerPage />} />
+        <Route path="/:libraryId/explore" element={<LibraryPage />} />
         <Route path="/:libraryId/root/*" element={<LibraryPage />} />
         <Route path="/:libraryId" element={<LibraryPage />} />
       </Routes>
