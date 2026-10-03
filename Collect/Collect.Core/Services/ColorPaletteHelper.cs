@@ -9,7 +9,7 @@ namespace Collect.Core.Services;
 /// saturation-weighted K-means++ clustering in CIE L*a*b* color space.
 /// </summary>
 public static class ColorPaletteHelper {
-    private const int MAX_IMAGE_SIZE = 400;
+    private const int MAX_IMAGE_SIZE = 200;
     private const int KMEANS_K = 10;
     private const double MERGE_THRESHOLD = 2.5;
     private const int MAX_KMEANS_ITER = 80;
@@ -30,16 +30,22 @@ public static class ColorPaletteHelper {
         if (pixels.Count == 0) return null;
 
         // Saturation-weighted (正确使用饱和度 S = C / L*)
-        var weights = new double[pixels.Count];
+        double[] weights = new double[pixels.Count];
+        double[] sat = new double[pixels.Count];
+        double sumSat = 0;
         for (int i = 0; i < pixels.Count; i++) {
             float L = pixels[i].X;
             float chroma = MathF.Sqrt(pixels[i].Y * pixels[i].Y + pixels[i].Z * pixels[i].Z);
             float L_safe = MathF.Max(L, 1f);   // 避免 L* 为 0 时除法异常
             float saturation = chroma / L_safe;
-
-            double sat = (double)saturation;
-            double clampedSat = Math.Clamp(sat, 0, 1000);  // 限制异常值
-            weights[i] = Math.Log10(clampedSat + 1.0) / 2.0 + 0.1;
+            sat[i] = Math.Clamp(saturation, 0, 20); // 限制异常值
+            sumSat += sat[i];
+        }
+        double avgSat = sumSat / pixels.Count + 0.1; // Epsilon
+        for (int i = 0; i < pixels.Count; i++) {
+            // weights[i] = Math.Log10(sat[i] + 1.0) / 2.0 + 0.1;
+            // 让我们更激进一点
+            weights[i] = (Math.Tanh(sat[i] - avgSat) + 1) / 2 * (sat[i] / 20);
         }
 
         ColorPalette? bestPalette = null;
