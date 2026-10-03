@@ -22,3 +22,15 @@ body {
 [role="menuitem"] {
     cursor: pointer;
 }
+
+/* The search box paints the query in a mirror layer behind the input, so the
+   input keeps only the caret and the placeholder visible. The text is hidden
+   with -webkit-text-fill-color instead of `color` on purpose: `color` still
+   drives the caret, which keeps it readable in both color modes. */
+.search-mirrored-input {
+    -webkit-text-fill-color: transparent;
+}
+
+.search-mirrored-input::placeholder {
+    -webkit-text-fill-color: var(--chakra-colors-fg-subtle);
+}

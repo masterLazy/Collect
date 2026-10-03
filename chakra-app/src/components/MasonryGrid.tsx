@@ -295,37 +295,37 @@ export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsse
     const renderCard = (asset: AssetDto) => {
         const batchSelected = !!selectionMode && !!selectedIds?.has(asset.id)
         return (
-        <Box key={asset.id} id={`asset-${asset.id}`} position="relative">
-            <AssetCard
-                asset={asset}
-                apiBase={API_BASE}
-                onClick={() => onSelectAsset(asset.id)}
-                onDragStart={handleCardDragStart(asset.id)}
-                onDragEnd={handleCardDragEnd}
-                uniform={viewMode === "grid"}
-                selected={selectionMode ? batchSelected : selectedAssetId === asset.id}
-                onBoost={onBoost}
-                onUndoBoost={onUndoBoost}
-                selectable={selectionMode}
-                batchSelected={batchSelected}
-                onToggleSelect={() => onToggleSelect?.(asset.id)}
-                removed={removedAssetIds?.has(asset.id) ? { reason: removedAssetIds.get(asset.id)! as 'deleted' | 'moved' } : undefined}
-            />
-            {/* Deep-link highlight ring — fades after ~2s */}
-            {highlightId === asset.id && (
-                <Box
-                    position="absolute"
-                    inset="0"
-                    borderRadius="md"
-                    border="2px solid"
-                    borderColor="fg"
-                    pointerEvents="none"
-                    zIndex="1"
-                    opacity={highlightVisible ? 1 : 0}
-                    transition="opacity 0.5s ease"
+            <Box key={asset.id} id={`asset-${asset.id}`} position="relative">
+                <AssetCard
+                    asset={asset}
+                    apiBase={API_BASE}
+                    onClick={() => onSelectAsset(asset.id)}
+                    onDragStart={handleCardDragStart(asset.id)}
+                    onDragEnd={handleCardDragEnd}
+                    uniform={viewMode === "grid"}
+                    selected={selectionMode ? batchSelected : selectedAssetId === asset.id}
+                    onBoost={onBoost}
+                    onUndoBoost={onUndoBoost}
+                    selectable={selectionMode}
+                    batchSelected={batchSelected}
+                    onToggleSelect={() => onToggleSelect?.(asset.id)}
+                    removed={removedAssetIds?.has(asset.id) ? { reason: removedAssetIds.get(asset.id)! as 'deleted' | 'moved' } : undefined}
                 />
-            )}
-        </Box>
+                {/* Deep-link highlight ring — fades after ~2s */}
+                {highlightId === asset.id && (
+                    <Box
+                        position="absolute"
+                        inset="0"
+                        borderRadius="md"
+                        border="2px solid"
+                        borderColor="fg"
+                        pointerEvents="none"
+                        zIndex="1"
+                        opacity={highlightVisible ? 1 : 0}
+                        transition="opacity 0.5s ease"
+                    />
+                )}
+            </Box>
         )
     }
 

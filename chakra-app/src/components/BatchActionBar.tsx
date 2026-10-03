@@ -71,7 +71,13 @@ export function BatchActionBar({ open, count, total, busy, onExit, onSelectAll, 
             // Selecting assets means clicking outside the bar all the time.
             closeOnInteractOutside={false}
         >
-            <ActionBar.Positioner>
+            {/* The action bar is an anchor-less popover, so Ark never sets a
+                `--z-index` on it and the positioner ends up at `z-index: auto`
+                (0). Card overlays such as the selection ring and the batch
+                checkmark sit at z-index 1–3 and would paint on top of the bar.
+                "docked" (10) puts the bar above those but still below dialogs
+                and toasts. */}
+            <ActionBar.Positioner zIndex="docked">
                 <ActionBar.Content
                     flexWrap={{ base: "wrap", md: "nowrap" }}
                     justifyContent="center"

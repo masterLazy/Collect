@@ -1106,30 +1106,48 @@ public partial class AssetService : IAssetService
                 a.RelativePath.Replace('\\', '/').StartsWith(folderPrefix, StringComparison.OrdinalIgnoreCase));
         }
 
-        // Parse query for tags: prefix
-        var tagMatch = System.Text.RegularExpressions.Regex.Match(query, @"tags:(\S+)");
-        if (tagMatch.Success)
+        // Structured filters: tags:, withoutTags:, type:, boost/size/width/height/ratio,
+        // plus bare words and "quoted phrases" matched against the file name.
+        var parsed = AssetSearchQueryParser.Parse(query);
+        if (parsed.InvalidTokens.Count > 0)
         {
-            var tagQuery = tagMatch.Groups[1].Value;
-            var requiredTags = tagQuery.Split('+', StringSplitOptions.RemoveEmptyEntries)
-                .Select(t => t.Trim())
-                .Where(t => t.Length > 0)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            results = results.Where(a =>
-                requiredTags.All(rt => a.Tags.Any(t =>
-                    t.Value.Equals(rt, StringComparison.OrdinalIgnoreCase))));
-
-            // Remove the tags: prefix from the query for further filename filtering
-            query = query.Replace(tagMatch.Value, "").Trim();
+            _logger.LogDebug("Search ignored {Count} unparsable token(s): {Tokens}",
+                parsed.InvalidTokens.Count, string.Join(", ", parsed.InvalidTokens));
         }
 
-        // Plain text filename search
-        if (!string.IsNullOrWhiteSpace(query))
+        if (parsed.Tags.Count > 0)
         {
-            var searchText = query;
             results = results.Where(a =>
-                a.FileName.Contains(searchText, StringComparison.OrdinalIgnoreCase));
+                parsed.Tags.All(f => a.Tags.Any(t => MatchesTagFilter(t, f))));
+        }
+
+        if (parsed.WithoutTags.Count > 0)
+        {
+            results = results.Where(a =>
+                !parsed.WithoutTags.Any(f => a.Tags.Any(t => MatchesTagFilter(t, f))));
+        }
+
+        if (parsed.FileTypes.Count > 0)
+        {
+            results = results.Where(a =>
+                parsed.FileTypes.Any(type => AssetSearchQueryParser.MatchesFileType(a.FileName, type)));
+        }
+
+        if (parsed.NumericFilters.Count > 0)
+        {
+            var boosts = GetBoostCountLookup();
+            results = results.Where(a =>
+                parsed.NumericFilters.All(f => AssetSearchQueryParser.MatchesNumeric(f, NumericValueOf(f.Target, a, boosts))));
+        }
+
+        foreach (var word in parsed.Words)
+        {
+            results = results.Where(a => a.FileName.Contains(word, StringComparison.OrdinalIgnoreCase));
+        }
+
+        foreach (var phrase in parsed.Phrases)
+        {
+            results = results.Where(a => a.FileName.Contains(phrase, StringComparison.OrdinalIgnoreCase));
         }
 
         var allResults = results.OrderByDescending(a => a.ImportedAt).ToList();
@@ -1147,6 +1165,46 @@ public partial class AssetService : IAssetService
             Page = page,
             PageSize = pageSize
         };
+    }
+
+    /// <summary>
+    /// A tag matches when the value matches and, if the query scoped the tag
+    /// with a <c>[type]</c> prefix, the type matches too.
+    /// </summary>
+    private static bool MatchesTagFilter(AssetTag tag, TagFilter filter) =>
+        tag.Value.Equals(filter.Value, StringComparison.OrdinalIgnoreCase) &&
+        (filter.Type is null || string.Equals(tag.Type, filter.Type, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Current value of the property a numeric filter targets.</summary>
+    private static double NumericValueOf(NumericTarget target, Asset asset, IReadOnlyDictionary<string, int>? boosts) => target switch
+    {
+        NumericTarget.Boost => boosts is not null && boosts.TryGetValue(asset.Id, out var count) ? count : 0,
+        NumericTarget.Size => asset.FileSize,
+        NumericTarget.Width => asset.Width,
+        NumericTarget.Height => asset.Height,
+        NumericTarget.Ratio => asset.Height > 0 ? (double)asset.Width / asset.Height : 0,
+        _ => 0,
+    };
+
+    /// <summary>
+    /// Boost counts for the current library, read once per search so a boost
+    /// filter does not hit the store for every asset.
+    /// </summary>
+    private Dictionary<string, int>? GetBoostCountLookup()
+    {
+        var libraryPath = _libraryService.GetLibraryPath();
+        if (libraryPath is null) return null;
+
+        try
+        {
+            return GetBoostsStore(libraryPath).Boosts
+                .ToDictionary(kv => kv.Key, kv => kv.Value.Count, StringComparer.Ordinal);
+        }
+        catch
+        {
+            // Boosts are best-effort: a filter on them must not break the search.
+            return null;
+        }
     }
 
     // ──────────────────────────────────────────────

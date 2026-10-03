@@ -31,6 +31,7 @@ import { TagConflictDialog } from "./TagConflictDialog"
 import { useCustomToaster, ToastContainer, CustomToaster } from "./CustomToast"
 import { api, ApiError } from "../services/api"
 import { imageFilesFromDataTransfer } from "../lib/clipboardFiles"
+import { extractQueryTags, extractQueryText, setQueryTags } from "../lib/searchQuery"
 import type { AssetDto, TagConflict } from "../types"
 
 const PAGE_SIZE = 30
@@ -211,12 +212,8 @@ export function LibraryPage() {
             setCurrentFolder(folderFromUrl)
             setSearchQuery(searchFromUrl)
 
-            // Parse tags from URL search query on initial load
-            const tagMatch = searchFromUrl.match(/^tags:(.+)$/)
-            if (tagMatch) {
-                const parsedTags = tagMatch[1].split("+").filter(Boolean)
-                setSelectedTags(parsedTags)
-            }
+            // Restore the tag filter from a deep link such as ?s=tags:cat+dog
+            setSelectedTags(extractQueryTags(searchFromUrl))
 
             // Deep-link: a #<asset_id> hash opens the sidebar and scrolls the grid to it
             const hashId = location.hash.replace(/^#/, "")
@@ -365,14 +362,9 @@ export function LibraryPage() {
         setPage(1)
         updateUrl(currentFolder, query)
 
-        // Sync selectedTags with tags: prefix in search query
-        const tagMatch = query.match(/^tags:(.+)$/)
-        if (tagMatch) {
-            const parsedTags = tagMatch[1].split("+").filter(Boolean)
-            setSelectedTags(parsedTags)
-        } else {
-            setSelectedTags([])
-        }
+        // Keep the Tags button in sync with the tags: filter, wherever it sits
+        // in the query — it may be combined with other filters and free text.
+        setSelectedTags(extractQueryTags(query))
 
         if (!libraryLoading && !exploreMode) {
             loadAssets(1, query, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
@@ -517,14 +509,15 @@ export function LibraryPage() {
 
     const handleTagsChange = useCallback((tags: string[]) => {
         setSelectedTags(tags)
-        const tagQuery = tags.length > 0 ? "tags:" + tags.join("+") : ""
+        // Rewrite only the tags: filter so other filters and free text survive.
+        const tagQuery = setQueryTags(searchQuery, tags)
         setSearchQuery(tagQuery)
         setPage(1)
         updateUrl(currentFolder, tagQuery)
         if (!libraryLoading) {
             loadAssets(1, tagQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
         }
-    }, [currentFolder, libraryLoading, loadAssets, updateUrl])
+    }, [currentFolder, libraryLoading, loadAssets, updateUrl, searchQuery])
 
     const handleLoadMore = useCallback(() => {
         if (loading) return
@@ -843,15 +836,20 @@ export function LibraryPage() {
     // to the plain library URL *and* run the query immediately — otherwise the
     // filter only shows up after a manual refresh.
     const handleExploreTagSelect = useCallback((value: string) => {
-        const query = "tags:" + value
+        // Explore is a separate route that shares this component instance, so the
+        // route change alone does not reload the grid: run the query explicitly.
+        // Existing filters and free text stay, the tags: filter is extended.
+        const current = extractQueryTags(searchQuery)
+        const next = current.indexOf(value) === -1 ? [...current, value] : current
+        const query = setQueryTags(searchQuery, next)
         setSearchQuery(query)
-        setSelectedTags([value])
+        setSelectedTags(next)
         setCurrentFolder("")
         setPage(1)
         setAssets([])
         navigate(buildUrl("", query, undefined, undefined, true))
         loadAssets(1, query, false, undefined, undefined)
-    }, [navigate, buildUrl, loadAssets])
+    }, [navigate, buildUrl, loadAssets, searchQuery])
 
     const handleSwitchLibrary = useCallback(() => {
         navigate("/", { state: { forceHome: true } })
@@ -995,7 +993,7 @@ export function LibraryPage() {
                     {exploreMode ? (
                         <TagExplore
                             libraryId={libraryId!}
-                            searchQuery={searchQuery}
+                            searchQuery={extractQueryText(searchQuery)}
                             onSelectTag={handleExploreTagSelect}
                         />
                     ) : (

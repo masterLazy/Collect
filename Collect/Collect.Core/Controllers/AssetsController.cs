@@ -259,8 +259,17 @@ public class AssetsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/assets/search?q=tags:a+b+c&amp;page=1&amp;size=30&amp;folder=...
-    /// Search assets by tags or filename, optionally filtered by folder.
+    /// GET /api/assets/search?q=...&amp;page=1&amp;size=30&amp;folder=...
+    /// Search assets by file name and/or structured filters, optionally limited to a folder.
+    /// <para>
+    /// The query is a list of whitespace separated tokens; all of them must match (AND):
+    /// <c>tags:a+b</c> (also <c>tags:a+-b</c> to exclude), <c>tags:[type]value</c>,
+    /// <c>withoutTags:x+y</c>, <c>type:png,webp</c>,
+    /// <c>boost&gt;=3</c>, <c>size&gt;=1MB</c> (B/KB/MB/GB), <c>width&gt;=1920</c>,
+    /// <c>height&gt;=1080</c>, <c>ratio&gt;=1.5</c>, and bare words or <c>"quoted phrases"</c>
+    /// matched against the file name. Numeric filters accept <c>&gt;=</c>, <c>&lt;=</c> and
+    /// <c>~</c> (within ±10%). Tokens that cannot be understood are ignored.
+    /// </para>
     /// </summary>
     [HttpGet("search")]
     public async Task<IActionResult> Search(

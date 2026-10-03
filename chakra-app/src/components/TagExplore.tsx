@@ -67,7 +67,7 @@ function TagThumbnail({ url, alt }: { url: string; alt: string }) {
                 objectFit="cover"
                 loading="lazy"
                 decoding="async"
-                opacity={loaded ? 0.8 : 0}
+                opacity={loaded ? 0.9 : 0}
                 transition="opacity 0.3s"
                 onLoad={() => setLoaded(true)}
                 onError={() => { setLoaded(true); setFailed(true) }}
@@ -105,7 +105,7 @@ function TagTile({ tag, onSelect }: { tag: TagExploreItemDto; onSelect: () => vo
 
             {/* Usage count */}
             <Box position="absolute" bottom="1" right="1.5" color="white" borderRadius="lg" px="2" py="1">
-                <Text fontSize="xl" color="white/95" lineHeight="1.2" fontWeight="light">{tag.count}</Text>
+                <Text fontSize="xl" color="white/95" lineHeight="1.2">{tag.count}</Text>
             </Box>
         </Box >
     )
@@ -143,13 +143,20 @@ export function TagExplore({ libraryId, searchQuery = "", onSelectTag }: TagExpl
     }, [libraryId, tagSearch, reloadKey])
 
     const groups = useMemo(
-        () => (data?.groups ?? []).filter((group) => group.tags.length > 0),
+        () => (data?.groups ?? []).filter((group) => group.tags.length > 0)
+            .map((group) => ({
+                ...group,
+                // 按 tag 名称做字典序排序（不改变原数组）
+                tags: [...group.tags].sort((a, b) =>
+                    a.value.localeCompare(b.value, undefined, { sensitivity: "base" })
+                ),
+            })),
         [data]
     )
     const shownTags = groups.reduce((sum, group) => sum + group.tags.length, 0)
 
     return (
-        <Stack gap="6">
+        <Stack gap="6" maxWidth="1200px" mx="auto">
             {/* Header */}
             <HStack justify="space-between" align="center" gap="3" flexWrap="wrap">
                 <Stack gap="0.5">
@@ -198,17 +205,17 @@ export function TagExplore({ libraryId, searchQuery = "", onSelectTag }: TagExpl
                         </Text>
                     )}
                     {groups.map((group) => (
-                        <Stack key={group.type ?? "__uncategorized"} gap="3">
+                        <Stack key={group.type ?? "__uncategorized"} gap="3" marginBottom="12">
                             <HStack gap="2" align="center">
-                                <Text fontSize="md" fontWeight="semibold" color="fg">
+                                <Text fontSize="xl" fontWeight={group.type != null ? "semibold" : "normal"} color="fg">
                                     {group.type ?? "Uncategorized"}
                                 </Text>
-                                <Text fontSize="sm" color="fg.subtle">{group.tags.length}</Text>
+                                <Text fontSize="sm" color="fg.subtle">{group.tags.length} tags</Text>
                                 <Box flex="1" height="1px" bg="border" />
                             </HStack>
                             <Box
                                 display="grid"
-                                gridTemplateColumns="repeat(auto-fill, minmax(184px, 1fr))"
+                                gridTemplateColumns="repeat(auto-fill, minmax(200px, 1fr))"
                                 gap="3"
                             >
                                 {group.tags.map((tag) => (

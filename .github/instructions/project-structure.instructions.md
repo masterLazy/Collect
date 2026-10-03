@@ -128,14 +128,40 @@ This is why a scan is not just an index refresh: it can actively rewrite filenam
 
 #### 4. Search semantics
 
-Search is implemented in the backend through `GET /api/assets/search` and `AssetService.SearchAsync`.
+Search is implemented in the backend through `GET /api/assets/search` and `AssetService.SearchAsync`, which parses the query with `AssetSearchQueryParser` (`Services/AssetSearchQuery.cs`).
 
-The query supports two layers of matching:
+A query is a list of whitespace-separated tokens that are all AND-ed together. A token becomes a filter only when it names a known field and carries a valid separator and value; anything else is matched against the file name.
 
-- tag-based search via the `tags:` prefix, e.g. `tags:人物+画师`
-- plain text search against the filename
+| Token | Meaning |
+|---|---|
+| `tags:a+b` | must carry every listed tag (alias `tag`) |
+| `tags:a+-b` | `+` combines, a leading `-` excludes |
+| `tags:[画师]name` | tag scoped to one tag type |
+| `withoutTags:x+y` | must carry none of the listed tags (aliases `withouttag`, `notag`, `notags`) |
+| `type:png,webp` | file extension (aliases `ext`, `format`); `image` matches any image |
+| `size>=1MB` | file size (alias `filesize`), units `B`/`KB`/`MB`/`GB` (1024-based), `K`/`M`/`G` shorthand |
+| `width>=1920` | pixel width, optional `px` suffix |
+| `height<=1080` | pixel height |
+| `ratio>=1.5` | width ÷ height (alias `aspect`) |
+| `boost>=3` | boost count (alias `boosts`) |
+| `"two words"` | verbatim phrase in the file name |
+| `landscape` | plain file-name substring |
 
-The `tags:` prefix is parsed into one or more required tag values. Assets must satisfy all specified tags (AND logic). After the tag filter is applied, any remaining text is used for filename substring matching.
+Numeric fields accept `>=`, `<=` and `~` (about, within ±10%); multiple filters on one field form a range (`size>=1MB size<=5MB`).
+
+Failure handling is deliberately forgiving while the user is typing:
+
+- an unfinished token (`tags:`, `width>=`) restricts nothing
+- a token with a bad value (`size>=abc`, `type>=png`) is demoted to a file-name search, so it matches nothing instead of silently showing the whole library
+- an unknown qualifier (`siz>=1MB`) is plain text
+
+#### 4b. Search-box UI (`components/SearchInput.tsx`)
+
+The query is syntax-highlighted. The real `<input>` renders only the caret — its glyphs are hidden by `-webkit-text-fill-color: transparent` (see `.search-mirrored-input` in `src/index.css`) — while a mirror layer directly behind it paints the coloured query. Both layers share the exact same text metrics (font size/line height/padding/1px border) and the mirror's scroll position is synced from the input; the highlight spans must never change font weight, because that would make the layers drift apart.
+
+`src/lib/searchQuery.ts` holds the frontend grammar: the field registry (`SEARCH_FIELDS`), `analyzeQuery()` (tokens + highlight spans + problems) and the helpers `extractQueryTags`, `setQueryTags`, `extractQueryText`. **Adding or renaming a field means updating this file and `Services/AssetSearchQuery.cs` together.**
+
+On focus the box offers, depending on the token under the caret: the filter reference (empty box), field-name completions, tag values / `[type]` scopes, file types, or the `>=`/`<=`/`~` operators plus size presets. Rows are picked with click, `Tab` or `Enter`. Malformed filters show a fix row and turn the box border red. `?` opens a clickable cheat sheet, `/` focuses the box from anywhere, `Enter` searches immediately and `Esc` closes the list / clears the query.
 
 #### 5. Frontend autocomplete and suggestion behavior
 
@@ -145,6 +171,8 @@ The frontend search bar and sidebar tag editor both use the same concept of tag 
 - when the user types bracketed category syntax like `[画师]` or `[`, the UI can suggest category names or values for the selected category
 - suggestions are filtered by the current input, the already selected values, and the category order
 - the editor also preserves type information when a user selects a suggested value, so a plain value can still be inserted as a categorized tag when appropriate
+
+The search bar additionally suggests field names, operators, numeric presets and file types, and shows the syntax cheat sheet when the box is empty (see 4b). Selecting a tag in Explore, or toggling one in the tag filter modal, only rewrites the `tags:` filter (`setQueryTags`) so other filters and free text stay in place.
 
 #### 6. Why this matters architecturally
 
