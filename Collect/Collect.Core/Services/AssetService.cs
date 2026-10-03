@@ -845,6 +845,21 @@ public partial class AssetService : IAssetService
         return _assets.FirstOrDefault(a => a.Id == id);
     }
 
+    /// <summary>
+    /// Tags for a set of assets, without any thumbnail or palette work. Used by the
+    /// batch tag editor, which needs the tags of every selected asset at once.
+    /// Unknown ids are omitted from the result.
+    /// </summary>
+    public async Task<Dictionary<string, List<AssetTag>>> GetTagsForAssetsAsync(IEnumerable<string> ids)
+    {
+        await EnsureScannedAsync();
+
+        var wanted = new HashSet<string>(ids, StringComparer.Ordinal);
+        return _assets
+            .Where(a => wanted.Contains(a.Id))
+            .ToDictionary(a => a.Id, a => new List<AssetTag>(a.Tags ?? new List<AssetTag>()));
+    }
+
     public async Task<List<Asset>> GetAllAssetsAsync()
     {
         await EnsureScannedAsync();

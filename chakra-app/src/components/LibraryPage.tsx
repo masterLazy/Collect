@@ -23,6 +23,10 @@ import { Sidebar } from "./Sidebar"
 import { DirectoryTree } from "./DirectoryTree"
 import { AddAssetDialog } from "./AddAssetDialog"
 import { TagExplore } from "./TagExplore"
+import { BatchActionBar } from "./BatchActionBar"
+import { BatchMoveDialog } from "./BatchMoveDialog"
+import { BatchDeleteDialog } from "./BatchDeleteDialog"
+import { BatchTagDialog } from "./BatchTagDialog"
 import { TagConflictDialog } from "./TagConflictDialog"
 import { useCustomToaster, ToastContainer, CustomToaster } from "./CustomToast"
 import { api, ApiError } from "../services/api"
@@ -137,6 +141,17 @@ export function LibraryPage() {
     const [encrypting, setEncrypting] = useState(false)
     // Track removed asset IDs with reason for permanent blur overlay
     const [removedAssetMap, setRemovedAssetMap] = useState<Map<string, 'deleted' | 'moved'>>(new Map())
+
+    // ── Batch selection ──
+    // Selection mode turns the gallery into a checkbox surface and shows the
+    // ActionBar with the batch operations.
+    const [selectionMode, setSelectionMode] = useState(false)
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+    const [batchMoveOpen, setBatchMoveOpen] = useState(false)
+    const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
+    const [batchTagOpen, setBatchTagOpen] = useState(false)
+    const [batchBusy, setBatchBusy] = useState(false)
+
     const initialSyncDone = useRef(false)
 
     // Dynamic page title based on library name and folder
@@ -231,6 +246,13 @@ export function LibraryPage() {
         const hashId = location.hash.replace(/^#/, "")
         setSelectedAssetId(hashId || null)
     }, [location.hash])
+
+    // A different slice of the library (folder, filter, sort, library, Explore)
+    // means different assets on screen, so the previous batch selection is dropped.
+    useEffect(() => {
+        setSelectedIds(new Set())
+        if (exploreMode) setSelectionMode(false)
+    }, [currentFolder, searchQuery, sortMode, libraryId, exploreMode])
 
     // Mobile detection
     useEffect(() => {
@@ -520,8 +542,10 @@ export function LibraryPage() {
             loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
             return
         }
-        if (reason === 'deleted' || reason === 'moved') {
-            // Keep the card in grid with permanent blur overlay
+        if (reason === 'deleted' || (reason === 'moved' && currentFolder !== "")) {
+            // Keep the card in grid with permanent blur overlay. A move under
+            // "All" does not remove the asset from this view (it only changed
+            // folder), so no placeholder is shown there.
             setRemovedAssetMap((prev) => new Map(prev).set(assetId, reason!))
         }
         // Always refresh directory tree counts after any change
@@ -529,8 +553,11 @@ export function LibraryPage() {
     }, [loadAssets, searchQuery, currentFolder])
 
     const handleMoveAsset = useCallback(async (assetId: string, targetFolder: string) => {
+        // Under "All" the asset stays visible after a move, so the "Moved"
+        // placeholder is only used when the current folder really loses it.
+        const markRemoved = currentFolder !== ""
         // Show blur overlay immediately
-        setRemovedAssetMap((prev) => new Map(prev).set(assetId, 'moved'))
+        if (markRemoved) setRemovedAssetMap((prev) => new Map(prev).set(assetId, 'moved'))
         try {
             await api.moveAsset(assetId, targetFolder, libraryId!)
             toaster.create({
@@ -542,7 +569,7 @@ export function LibraryPage() {
             setTreeRefreshKey((k) => k + 1)
         } catch {
             // Move failed — remove blur overlay
-            setRemovedAssetMap((prev) => {
+            if (markRemoved) setRemovedAssetMap((prev) => {
                 const next = new Map(prev)
                 next.delete(assetId)
                 return next
@@ -553,7 +580,7 @@ export function LibraryPage() {
                 type: "error",
             })
         }
-    }, [toaster])
+    }, [toaster, currentFolder, libraryId])
 
     const handleCategorizeSave = useCallback(() => {
         setPage(1)
@@ -691,6 +718,141 @@ export function LibraryPage() {
         navigate(buildUrl(currentFolder, searchQuery, sortMode), { replace: true })
     }, [currentFolder, searchQuery, sortMode, buildUrl, navigate])
 
+    // ── Batch selection ──────────────────────────────
+
+    const exitSelectionMode = useCallback(() => {
+        setSelectionMode(false)
+        setSelectedIds(new Set())
+    }, [])
+
+    const handleToggleSelectionMode = useCallback(() => {
+        if (selectionMode) {
+            exitSelectionMode()
+            return
+        }
+        // The sidebar and a selection click would compete for the same gesture.
+        handleCloseSidebar()
+        setSelectedIds(new Set())
+        setSelectionMode(true)
+    }, [selectionMode, exitSelectionMode, handleCloseSidebar])
+
+    const handleToggleSelect = useCallback((id: string) => {
+        setSelectedIds((prev) => {
+            const next = new Set(prev)
+            if (next.has(id)) next.delete(id)
+            else next.add(id)
+            return next
+        })
+    }, [])
+
+    // "Select all" covers the assets currently loaded in the gallery — the grid
+    // only ever acts on those.
+    const handleSelectAllLoaded = useCallback(() => {
+        setSelectedIds(new Set(assets.map((a) => a.id)))
+    }, [assets])
+
+    const handleClearSelection = useCallback(() => setSelectedIds(new Set()), [])
+
+    const handleBatchMove = useCallback(async (targetFolder: string) => {
+        if (!libraryId) return
+        const ids = Array.from(selectedIds)
+        setBatchBusy(true)
+        const failed = new Set<string>()
+        let moved = 0
+        for (const id of ids) {
+            try {
+                await api.moveAsset(id, targetFolder, libraryId)
+                moved++
+            } catch {
+                failed.add(id)
+            }
+        }
+        setBatchBusy(false)
+        setBatchMoveOpen(false)
+
+        // Outside "All" the current folder loses the assets, so they stay in the
+        // grid as "Moved" placeholders. Under "All" they remain part of the view.
+        if (currentFolder !== "") {
+            setRemovedAssetMap((prev) => {
+                const next = new Map(prev)
+                ids.forEach((id) => { if (!failed.has(id)) next.set(id, 'moved') })
+                return next
+            })
+        }
+        setTreeRefreshKey((k) => k + 1)
+        setSelectedIds(new Set())
+        toaster.create({
+            title: failed.size === 0
+                ? `${moved} asset${moved === 1 ? "" : "s"} moved`
+                : "Move finished with errors",
+            description: failed.size === 0
+                ? `Moved to ${targetFolder || "root"}.`
+                : `${moved} of ${ids.length} moved to ${targetFolder || "root"}.`,
+            type: failed.size === 0 ? "success" : "error",
+        })
+    }, [selectedIds, libraryId, currentFolder, toaster])
+
+    const handleBatchDelete = useCallback(async () => {
+        if (!libraryId) return
+        const ids = Array.from(selectedIds)
+        setBatchBusy(true)
+        const failed = new Set<string>()
+        let deleted = 0
+        for (const id of ids) {
+            try {
+                await api.deleteAsset(id, libraryId)
+                deleted++
+            } catch {
+                failed.add(id)
+            }
+        }
+        setBatchBusy(false)
+        setBatchDeleteOpen(false)
+
+        // Same treatment as the single-asset delete: the card stays in place,
+        // blurred, until the library is rescanned.
+        setRemovedAssetMap((prev) => {
+            const next = new Map(prev)
+            ids.forEach((id) => { if (!failed.has(id)) next.set(id, 'deleted') })
+            return next
+        })
+        setTreeRefreshKey((k) => k + 1)
+        setSelectedIds(new Set())
+        toaster.create({
+            title: failed.size === 0
+                ? `${deleted} asset${deleted === 1 ? "" : "s"} deleted`
+                : "Delete finished with errors",
+            description: failed.size === 0
+                ? "The files were removed from disk."
+                : `${deleted} of ${ids.length} deleted.`,
+            type: failed.size === 0 ? "success" : "error",
+        })
+    }, [selectedIds, libraryId, toaster])
+
+    // Tag edits rename files on disk, so the visible page is refetched. The
+    // selection is kept so the same batch can be edited again.
+    const handleBatchTagsApplied = useCallback(() => {
+        setPage(1)
+        setAssets([])
+        setTreeRefreshKey((k) => k + 1)
+        loadAssets(1, searchQuery, false, toApiFolder(currentFolder), getSubfolders(currentFolder))
+    }, [loadAssets, searchQuery, currentFolder])
+
+    // Explore is a separate route but the same component instance, so nothing
+    // reloads the grid when the route changes. Picking a tag there must navigate
+    // to the plain library URL *and* run the query immediately — otherwise the
+    // filter only shows up after a manual refresh.
+    const handleExploreTagSelect = useCallback((value: string) => {
+        const query = "tags:" + value
+        setSearchQuery(query)
+        setSelectedTags([value])
+        setCurrentFolder("")
+        setPage(1)
+        setAssets([])
+        navigate(buildUrl("", query, undefined, undefined, true))
+        loadAssets(1, query, false, undefined, undefined)
+    }, [navigate, buildUrl, loadAssets])
+
     const handleSwitchLibrary = useCallback(() => {
         navigate("/", { state: { forceHome: true } })
     }, [navigate])
@@ -804,6 +966,8 @@ export function LibraryPage() {
                 onSortChange={handleSortChange}
                 viewMode={viewMode}
                 onViewModeChange={handleViewModeChange}
+                selectionMode={selectionMode}
+                onToggleSelectionMode={handleToggleSelectionMode}
             />
 
             <Box
@@ -832,13 +996,7 @@ export function LibraryPage() {
                         <TagExplore
                             libraryId={libraryId!}
                             searchQuery={searchQuery}
-                            onSelectTag={(value) => {
-                                const query = "tags:" + value
-                                setSearchQuery(query)
-                                setSelectedTags([value])
-                                setPage(1)
-                                navigate(`/${libraryId}?s=${encodeURIComponent(query)}`)
-                            }}
+                            onSelectTag={handleExploreTagSelect}
                         />
                     ) : (
                         <MasonryGrid
@@ -856,6 +1014,9 @@ export function LibraryPage() {
                             selectedAssetId={selectedAssetId}
                             onBoost={handleBoost}
                             onUndoBoost={handleUndoBoost}
+                            selectionMode={selectionMode}
+                            selectedIds={selectedIds}
+                            onToggleSelect={handleToggleSelect}
                         />
                     )}
                 </Box>
@@ -863,6 +1024,48 @@ export function LibraryPage() {
                 {/* Right: Docked Sidebar (desktop only) */}
                 {selectedAssetId && !exploreMode && <SidebarPanel assetId={selectedAssetId} onClose={handleCloseSidebar} toaster={toaster as CustomToaster} selectedTags={selectedTags} onTagClick={(value) => handleTagsChange(selectedTags.includes(value) ? selectedTags.filter((t) => t !== value) : [...selectedTags, value])} onRefreshRequested={(id, reason) => handleAssetMoved(id, reason)} boostPatch={boostPatch} onBoostChanged={applyBoostState} />}
             </Box>
+
+            {/* Batch mode: floating action bar plus its confirmations. The bar is
+                hidden while a dialog is open — a modal overlay must not have an
+                interactive bar floating above it. */}
+            <BatchActionBar
+                open={selectionMode && !batchMoveOpen && !batchDeleteOpen && !batchTagOpen}
+                count={selectedIds.size}
+                total={assets.length}
+                busy={batchBusy}
+                onExit={exitSelectionMode}
+                onSelectAll={handleSelectAllLoaded}
+                onClear={handleClearSelection}
+                onMove={() => setBatchMoveOpen(true)}
+                onDelete={() => setBatchDeleteOpen(true)}
+                onTags={() => setBatchTagOpen(true)}
+            />
+
+            <BatchMoveDialog
+                open={batchMoveOpen}
+                onOpenChange={setBatchMoveOpen}
+                count={selectedIds.size}
+                libraryId={libraryId!}
+                busy={batchBusy}
+                onConfirm={handleBatchMove}
+            />
+
+            <BatchDeleteDialog
+                open={batchDeleteOpen}
+                onOpenChange={setBatchDeleteOpen}
+                count={selectedIds.size}
+                busy={batchBusy}
+                onConfirm={handleBatchDelete}
+            />
+
+            <BatchTagDialog
+                open={batchTagOpen}
+                onOpenChange={setBatchTagOpen}
+                ids={Array.from(selectedIds)}
+                libraryId={libraryId!}
+                toaster={toaster as CustomToaster}
+                onApplied={handleBatchTagsApplied}
+            />
 
             <AddAssetDialog
                 open={addDialogOpen}

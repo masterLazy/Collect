@@ -17,6 +17,12 @@ interface AssetCardProps {
     onBoost?: (id: string) => void
     /** Take back today's boost (count −1, can be boosted again today). */
     onUndoBoost?: (id: string) => void
+    /** Batch mode: activating the card toggles its selection instead of opening the sidebar. */
+    selectable?: boolean
+    /** Batch mode: whether this card is part of the current batch selection. */
+    batchSelected?: boolean
+    /** Batch mode: called when the card is activated. */
+    onToggleSelect?: () => void
 }
 
 function BoostIcon() {
@@ -48,7 +54,16 @@ function DragHandleIcon() {
     )
 }
 
-export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, removed, uniform, selected, onBoost, onUndoBoost }: AssetCardProps) {
+/** Checkmark shown inside the batch-selection indicator of a selected card. */
+function CheckIcon() {
+    return (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+        </svg>
+    )
+}
+
+export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, removed, uniform, selected, onBoost, onUndoBoost, selectable, batchSelected, onToggleSelect }: AssetCardProps) {
     const [loaded, setLoaded] = useState(false)
     const [error, setError] = useState(false)
     const [hovered, setHovered] = useState(false)
@@ -63,19 +78,27 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, rem
     const boostRevealed = boostedToday || boostCount > 0 || hovered
     const canBoost = !!(onBoost || onUndoBoost)
 
+    // In batch mode the whole card acts as a checkbox: drag handle and boost pill
+    // are hidden so a click can only mean "toggle selection".
+    const activate = () => {
+        if (selectable) onToggleSelect?.()
+        else onClick()
+    }
+
     return (
         <Box
             cursor={isRemoved ? "default" : "pointer"}
-            onClick={isRemoved ? undefined : onClick}
+            onClick={isRemoved ? undefined : activate}
             onKeyDown={isRemoved ? undefined : (e: React.KeyboardEvent) => {
                 if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault()
-                    onClick()
+                    activate()
                 }
             }}
-            role={isRemoved ? undefined : "button"}
+            role={isRemoved ? undefined : (selectable ? "checkbox" : "button")}
+            aria-checked={isRemoved ? undefined : (selectable ? !!batchSelected : undefined)}
             tabIndex={isRemoved ? undefined : 0}
-            aria-label={asset.fileName}
+            aria-label={selectable ? `${batchSelected ? "Deselect" : "Select"} ${asset.fileName}` : asset.fileName}
             title={asset.fileName}
             borderRadius="md"
             overflow="hidden"
@@ -84,7 +107,6 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, rem
             borderColor="border"
             transition="all 0.2s"
             _hover={isRemoved ? {} : { transform: "translateY(-2px)", shadow: "md" }}
-            _focusVisible={{ outline: "2px solid", outlineColor: "border.emphasized", outlineOffset: "2px" }}
             onMouseEnter={isRemoved ? undefined : () => setHovered(true)}
             onMouseLeave={isRemoved ? undefined : () => setHovered(false)}
             position="relative"
@@ -142,8 +164,32 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, rem
                 )}
             </Box>
 
+            {/* Batch selection indicator — top-right corner, always visible in batch mode */}
+            {!isRemoved && selectable && (
+                <Box
+                    position="absolute"
+                    top="2"
+                    right="2"
+                    width="24px"
+                    height="24px"
+                    display="flex"
+                    alignItems="center"
+                    justifyContent="center"
+                    borderRadius="full"
+                    border="2px solid"
+                    bg={batchSelected ? "blue.600" : "black/50"}
+                    borderColor={batchSelected ? "blue.600" : "white"}
+                    color="white"
+                    boxShadow="sm"
+                    pointerEvents="none"
+                    zIndex="3"
+                >
+                    {batchSelected && <CheckIcon />}
+                </Box>
+            )}
+
             {/* Drag handle — top-left corner, blends into the card edge, visible on hover */}
-            {!isRemoved && (
+            {!isRemoved && !selectable && (
                 <Box
                     position="absolute"
                     top="0"
@@ -174,8 +220,9 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, rem
 
             {/* Boost pill — bottom-right corner. White outline on a translucent dark
                 scrim while today's boost is available; solid blue once it has been
-                given. Hidden until hover for assets that were never boosted. */}
-            {!isRemoved && canBoost && (
+                given. Hidden until hover for assets that were never boosted.
+                Suppressed in batch mode (clicking a card selects, not boosts). */}
+            {!isRemoved && canBoost && !selectable && (
                 <Box
                     as="button"
                     position="absolute"
@@ -250,7 +297,7 @@ export function AssetCard({ asset, apiBase, onClick, onDragStart, onDragEnd, rem
                     position="absolute"
                     inset="0"
                     border="2px solid"
-                    borderColor="fg"
+                    borderColor="blue.600"
                     borderRadius="md"
                     pointerEvents="none"
                     zIndex="3"

@@ -8,11 +8,18 @@ import type { CustomToaster } from "./CustomToast"
 
 interface TagEditorProps {
     tags: AssetTag[]
-    assetId: string
+    /** Asset whose tags are edited. Optional in batch mode, where a shared list is edited. */
+    assetId?: string
     onTagsChange: (tags: AssetTag[]) => void
     onTagClick?: (value: string) => void
     selectedTags?: string[]
     onTagsSaved?: (updatedAsset: AssetDetailDto) => void
+    /**
+     * Reuse the editor for a derived tag list ("common tags" of a batch): saving
+     * runs this handler instead of the single-asset PUT. The handler receives the
+     * edited list; the editor resets its baseline when the promise resolves.
+     */
+    onSaveOverride?: (tags: AssetTag[]) => Promise<void>
     libraryId: string
     toaster?: CustomToaster
     /** Hide the built-in "Tags" title when the parent already renders a section header. */
@@ -61,7 +68,7 @@ function EditIcon() {
     )
 }
 
-export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTags = [], onTagsSaved, libraryId, toaster, hideLabel }: TagEditorProps) {
+export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTags = [], onTagsSaved, onSaveOverride, libraryId, toaster, hideLabel }: TagEditorProps) {
     const [initialTags, setInitialTags] = useState<AssetTag[]>([])
     const [inputValue, setInputValue] = useState("")
     const [suggestions, setSuggestions] = useState<string[]>([])
@@ -249,7 +256,13 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
         }
         setSaving(true)
         try {
-            const updated = await api.updateTags(assetId, tags, libraryId)
+            if (onSaveOverride) {
+                await onSaveOverride(tags)
+                setInitialTags([...tags])
+                setDeleteMode(false)
+                return
+            }
+            const updated = await api.updateTags(assetId ?? "", tags, libraryId)
             setInitialTags(updated.tags)
             setDeleteMode(false)
             onTagsSaved?.(updated)
@@ -341,15 +354,15 @@ export function TagEditor({ tags, assetId, onTagsChange, onTagClick, selectedTag
             <EditIcon />
         </Box>
     ) : null
-    const saveControls = onTagsSaved && (deleteMode || hasChanges) ? (
+    const saveControls = (onTagsSaved || onSaveOverride) && (deleteMode || hasChanges) ? (
         <HStack gap="1" flexShrink="0">
             {/* Reset — only when there are pending changes */}
             {hasChanges && (
-                <Button size="xs" variant="ghost" colorPalette="red" onClick={handleUndo} px="1.5">
+                <Button size="xs" variant="ghost" colorPalette="red" onClick={handleUndo} px="1.5" aria-label="Discard tag changes">
                     <UndoIcon />
                 </Button>
             )}
-            <Button size="xs" variant="ghost" colorPalette="accent" loading={saving} onClick={handleSave} px="1.5">
+            <Button size="xs" variant="ghost" colorPalette="accent" loading={saving} onClick={handleSave} px="1.5" aria-label="Save tags">
                 <CheckIcon />
             </Button>
         </HStack>

@@ -33,6 +33,12 @@ interface MasonryGridProps {
     onBoost?: (id: string) => void
     /** Take back today's boost from the card. */
     onUndoBoost?: (id: string) => void
+    /** Batch mode: clicking a card toggles selection instead of opening the sidebar. */
+    selectionMode?: boolean
+    /** Batch mode: the ids currently selected. */
+    selectedIds?: Set<string>
+    /** Batch mode: toggle one asset's selection. */
+    onToggleSelect?: (id: string) => void
 }
 
 // Column width adaptation.
@@ -121,7 +127,7 @@ function createDragGhost(thumbSrc: string | null): HTMLDivElement | null {
     return ghost
 }
 
-export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsset, currentFolder, searchQuery, removedAssetIds, scrollToAssetId, onScrollTargetHandled, viewMode = "masonry", selectedAssetId, onBoost, onUndoBoost }: MasonryGridProps) {
+export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsset, currentFolder, searchQuery, removedAssetIds, scrollToAssetId, onScrollTargetHandled, viewMode = "masonry", selectedAssetId, onBoost, onUndoBoost, selectionMode, selectedIds, onToggleSelect }: MasonryGridProps) {
     const sentinelRef = useRef<HTMLDivElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
     const loadingRef = useRef(loading)
@@ -286,7 +292,9 @@ export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsse
     }
 
     // Shared card renderer — masonry and grid differ only in their layout container.
-    const renderCard = (asset: AssetDto) => (
+    const renderCard = (asset: AssetDto) => {
+        const batchSelected = !!selectionMode && !!selectedIds?.has(asset.id)
+        return (
         <Box key={asset.id} id={`asset-${asset.id}`} position="relative">
             <AssetCard
                 asset={asset}
@@ -295,9 +303,12 @@ export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsse
                 onDragStart={handleCardDragStart(asset.id)}
                 onDragEnd={handleCardDragEnd}
                 uniform={viewMode === "grid"}
-                selected={selectedAssetId === asset.id}
+                selected={selectionMode ? batchSelected : selectedAssetId === asset.id}
                 onBoost={onBoost}
                 onUndoBoost={onUndoBoost}
+                selectable={selectionMode}
+                batchSelected={batchSelected}
+                onToggleSelect={() => onToggleSelect?.(asset.id)}
                 removed={removedAssetIds?.has(asset.id) ? { reason: removedAssetIds.get(asset.id)! as 'deleted' | 'moved' } : undefined}
             />
             {/* Deep-link highlight ring — fades after ~2s */}
@@ -315,7 +326,8 @@ export function MasonryGrid({ assets, loading, hasMore, onLoadMore, onSelectAsse
                 />
             )}
         </Box>
-    )
+        )
+    }
 
     return (
         <Box ref={containerRef} onDragOver={handleDragOver} onDrop={handleDrop}>

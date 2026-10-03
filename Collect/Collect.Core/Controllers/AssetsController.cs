@@ -105,6 +105,30 @@ public class AssetsController : ControllerBase
         Request.Headers.TryGetValue("X-Unlock-Token", out var values) ? values.FirstOrDefault() : null;
 
     /// <summary>
+    /// GET /api/assets/batch/tags?ids=a,b,c
+    /// Tags for several assets at once (used by the batch tag editor). Cheaper than
+    /// fetching each asset's full detail: no palette computation, one round trip.
+    /// </summary>
+    [HttpGet("batch/tags")]
+    public async Task<IActionResult> GetBatchTags([FromQuery] string? ids)
+    {
+        // Strict mode: a name-encrypted library that is locked must not reveal real names/tags.
+        if (_libraryService.IsEncryptedLibrary() && _libraryService.EncryptsFileNames() && !_libraryService.IsLibraryUnlocked(GetUnlockToken()))
+            return StatusCode(403, new { error = "Library is locked. Please unlock first." });
+
+        var idList = (ids ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct()
+            .ToList();
+
+        if (idList.Count == 0)
+            return Ok(new Dictionary<string, List<AssetTag>>());
+
+        var result = await _assetService.GetTagsForAssetsAsync(idList);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// GET /api/assets/{id}/thumbnail
     /// Serve the thumbnail image for an asset (generates if missing).
     /// Returns 403 if the library is encrypted and not unlocked.

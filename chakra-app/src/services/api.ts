@@ -226,6 +226,16 @@ export const api = {
         get<PaginatedResponse<AssetDto>>(`/api/assets/search?libraryId=${encodeURIComponent(libraryId)}&q=${encodeURIComponent(query)}&page=${page}&size=${size}${folder ? `&folder=${encodeURIComponent(folder)}` : ""}`),
     updateTags: (id: string, tags: AssetTag[], libraryId: string) =>
         put<AssetDetailDto>(`/api/assets/${id}/tags?libraryId=${encodeURIComponent(libraryId)}`, { tags }),
+    /**
+     * Tags for several assets at once, keyed by asset id. One round trip and no
+     * palette/thumbnail work on the server, so it stays cheap for large batches.
+     */
+    getAssetsTags: (ids: string[], libraryId: string) => {
+        const params = new URLSearchParams()
+        params.set("libraryId", libraryId)
+        params.set("ids", ids.join(","))
+        return get<Record<string, AssetTag[]>>(`/api/assets/batch/tags?${params.toString()}`)
+    },
     getTags: (libraryId: string, page?: number, size?: number, search?: string) => {
         const params = new URLSearchParams()
         params.set("libraryId", libraryId)

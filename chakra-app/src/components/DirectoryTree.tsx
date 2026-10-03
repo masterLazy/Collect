@@ -532,7 +532,7 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
             {/* Explore is a plain row in the list — it scrolls with the tree instead
                 of being pinned above it. */}
             <Box flex="1" minH="0" overflowY="auto">
-            {onOpenExplore && (
+                {onOpenExplore && (
                     <Box
                         as="button"
                         onClick={onOpenExplore}
@@ -564,109 +564,109 @@ export function DirectoryTree({ currentFolder, onFolderChange, onMoveAsset, refr
                         </Text>
                     </Box>
                 )}
-            <Stack gap="0" role="tree" aria-label="Directory tree">
-                {/* "All" root item */}
-                <HStack
-                    gap="2"
-                    height="30px"
-                    pl="8px"
-                    pr="2"
-                    mx="1"
-                    borderRadius="sm"
-                    cursor="pointer"
-                    bg={currentFolder === "" ? "bg.muted" : "transparent"}
-                    borderLeft="2px solid"
-                    borderLeftColor={currentFolder === "" ? "fg.muted" : "transparent"}
-                    _hover={{ bg: currentFolder === "" ? "bg.muted" : "bg.subtle" }}
-                    onClick={() => onFolderChange("")}
-                    transition="background 0.12s"
-                    role="treeitem"
-                    aria-selected={currentFolder === ""}
-                >
-                    <Box width="14px" flexShrink="0" />
-                    <Box as="span" color="fg.muted" flexShrink="0" display="inline-flex">
-                        <AllIcon />
-                    </Box>
-                    <Text fontSize="sm" color="fg" truncate flex="1" fontWeight={currentFolder === "" ? "medium" : "normal"}>
-                        All
-                    </Text>
-                    {totalAssetCount > 0 && (
-                        <Text fontSize="xs" color="fg.subtle" flexShrink="0">
-                            {totalAssetCount}
+                <Stack gap="0" role="tree" aria-label="Directory tree">
+                    {/* "All" root item */}
+                    <HStack
+                        gap="2"
+                        height="30px"
+                        pl="8px"
+                        pr="2"
+                        mx="1"
+                        borderRadius="sm"
+                        cursor="pointer"
+                        bg={currentFolder === "" ? "bg.muted" : "transparent"}
+                        borderLeft="2px solid"
+                        borderLeftColor={currentFolder === "" ? "fg.muted" : "transparent"}
+                        _hover={{ bg: currentFolder === "" ? "bg.muted" : "bg.subtle" }}
+                        onClick={() => onFolderChange("")}
+                        transition="background 0.12s"
+                        role="treeitem"
+                        aria-selected={currentFolder === ""}
+                    >
+                        <Box width="14px" flexShrink="0" />
+                        <Box as="span" color="fg.muted" flexShrink="0" display="inline-flex">
+                            <AllIcon />
+                        </Box>
+                        <Text fontSize="sm" color="fg" truncate flex="1" fontWeight={currentFolder === "" ? "medium" : "normal"}>
+                            All
                         </Text>
-                    )}
-                </HStack>
-
-                {/* Separator line */}
-                <Box h="1px" bg="border" mx="2" my="1" />
-
-                {loading ? (
-                    <Text fontSize="xs" color="fg.subtle" px="3" py="2">
-                        Loading...
-                    </Text>
-                ) : (
-                    <>
-                        {/* Uncategorized — always first among folders */}
-                        {sortedChildren.filter((c) => c.name === "Uncategorized").map((child) => (
-                            <FolderNode
-                                key={child.path}
-                                node={child}
-                                depth={0}
-                                currentFolder={currentFolder}
-                                onFolderChange={onFolderChange}
-                                loadTree={loadTree}
-                                onMoveAsset={onMoveAsset}
-                                libraryId={libraryId}
-                            />
-                        ))}
-
-                        {/* "Root" item — assets not in any subdirectory */}
-                        <HStack
-                            gap="2"
-                            height="30px"
-                            pl="8px"
-                            pr="2"
-                            mx="1"
-                            borderRadius="sm"
-                            cursor="pointer"
-                            bg={rootDragOver || currentFolder === "__root__" ? "bg.muted" : "transparent"}
-                            borderLeft="2px solid"
-                            borderLeftColor={rootDragOver ? "border.emphasized" : currentFolder === "__root__" ? "fg.muted" : "transparent"}
-                            _hover={{ bg: rootDragOver || currentFolder === "__root__" ? "bg.muted" : "bg.subtle" }}
-                            onClick={() => onFolderChange("__root__")}
-                            onDragOver={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(true); e.dataTransfer.dropEffect = "move"; }}
-                            onDragLeave={(e: React.DragEvent) => { e.stopPropagation(); setRootDragOver(false); }}
-                            onDrop={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(false); const assetId = e.dataTransfer.getData("text/plain"); if (assetId && onMoveAsset) { onMoveAsset(assetId, ""); } }}
-                            transition="background 0.12s"
-                            role="treeitem"
-                            aria-selected={currentFolder === "__root__"}
-                        >
-                            <Box width="14px" flexShrink="0" />
-                            <Box as="span" color="fg.muted" flexShrink="0" display="inline-flex">
-                                <RootIcon />
-                            </Box>
-                            <Text fontSize="sm" color="fg" truncate flex="1" fontWeight={currentFolder === "__root__" ? "medium" : "normal"}>
-                                Root
+                        {totalAssetCount > 0 && (
+                            <Text fontSize="xs" color="fg.subtle" flexShrink="0">
+                                {totalAssetCount}
                             </Text>
-                        </HStack>
+                        )}
+                    </HStack>
 
-                        {/* Regular folders */}
-                        {sortedChildren.filter((c) => c.name !== "Uncategorized").map((child) => (
-                            <FolderNode
-                                key={child.path}
-                                node={child}
-                                depth={0}
-                                currentFolder={currentFolder}
-                                onFolderChange={onFolderChange}
-                                loadTree={loadTree}
-                                onMoveAsset={onMoveAsset}
-                                libraryId={libraryId}
-                            />
-                        ))}
-                    </>
-                )}
+                    {/* Separator line */}
+                    <Box h="1px" bg="border" mx="2" my="1" />
 
-            </Stack>
+                    {loading ? (
+                        <Text fontSize="xs" color="fg.subtle" px="3" py="2">
+                            Loading...
+                        </Text>
+                    ) : (
+                        <>
+                            {/* Uncategorized — always first among folders */}
+                            {sortedChildren.filter((c) => c.name === "Uncategorized").map((child) => (
+                                <FolderNode
+                                    key={child.path}
+                                    node={child}
+                                    depth={0}
+                                    currentFolder={currentFolder}
+                                    onFolderChange={onFolderChange}
+                                    loadTree={loadTree}
+                                    onMoveAsset={onMoveAsset}
+                                    libraryId={libraryId}
+                                />
+                            ))}
+
+                            {/* "Root" item — assets not in any subdirectory */}
+                            <HStack
+                                gap="2"
+                                height="30px"
+                                pl="8px"
+                                pr="2"
+                                mx="1"
+                                borderRadius="sm"
+                                cursor="pointer"
+                                bg={rootDragOver || currentFolder === "__root__" ? "bg.muted" : "transparent"}
+                                borderLeft="2px solid"
+                                borderLeftColor={rootDragOver ? "border.emphasized" : currentFolder === "__root__" ? "fg.muted" : "transparent"}
+                                _hover={{ bg: rootDragOver || currentFolder === "__root__" ? "bg.muted" : "bg.subtle" }}
+                                onClick={() => onFolderChange("__root__")}
+                                onDragOver={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(true); e.dataTransfer.dropEffect = "move"; }}
+                                onDragLeave={(e: React.DragEvent) => { e.stopPropagation(); setRootDragOver(false); }}
+                                onDrop={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setRootDragOver(false); const assetId = e.dataTransfer.getData("text/plain"); if (assetId && onMoveAsset) { onMoveAsset(assetId, ""); } }}
+                                transition="background 0.12s"
+                                role="treeitem"
+                                aria-selected={currentFolder === "__root__"}
+                            >
+                                <Box width="14px" flexShrink="0" />
+                                <Box as="span" color="fg.muted" flexShrink="0" display="inline-flex">
+                                    <RootIcon />
+                                </Box>
+                                <Text fontSize="sm" color="fg" truncate flex="1" fontWeight={currentFolder === "__root__" ? "medium" : "normal"}>
+                                    Root
+                                </Text>
+                            </HStack>
+
+                            {/* Regular folders */}
+                            {sortedChildren.filter((c) => c.name !== "Uncategorized").map((child) => (
+                                <FolderNode
+                                    key={child.path}
+                                    node={child}
+                                    depth={0}
+                                    currentFolder={currentFolder}
+                                    onFolderChange={onFolderChange}
+                                    loadTree={loadTree}
+                                    onMoveAsset={onMoveAsset}
+                                    libraryId={libraryId}
+                                />
+                            ))}
+                        </>
+                    )}
+
+                </Stack>
             </Box>
 
             {/* New Folder — pinned below the scrolling list */}

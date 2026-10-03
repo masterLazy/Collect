@@ -67,7 +67,7 @@ function TagThumbnail({ url, alt }: { url: string; alt: string }) {
                 objectFit="cover"
                 loading="lazy"
                 decoding="async"
-                opacity={loaded ? 1 : 0}
+                opacity={loaded ? 0.8 : 0}
                 transition="opacity 0.3s"
                 onLoad={() => setLoaded(true)}
                 onError={() => { setLoaded(true); setFailed(true) }}
@@ -97,16 +97,17 @@ function TagTile({ tag, onSelect }: { tag: TagExploreItemDto; onSelect: () => vo
         >
             <TagThumbnail url={tag.thumbnailUrl} alt={tag.value} />
 
-            {/* Usage count */}
-            <Box position="absolute" top="1.5" right="1.5" bg="black/60" color="white" borderRadius="sm" px="2" py="1">
-                <Text fontSize="xs" lineHeight="1.2">{tag.count}</Text>
+            {/* Tag value */}
+            <Box position="absolute" left="0" right="0" bottom="0" px="2.5" py="1.5"
+                bgGradient="to-r" gradientFrom="black/65" gradientTo="black/20">
+                <Text fontSize="xl" color="white/95" textAlign="left" fontWeight="black" truncate>{tag.value}</Text>
             </Box>
 
-            {/* Tag value */}
-            <Box position="absolute" left="0" right="0" bottom="0" bg="black/65" px="2.5" py="1.5">
-                <Text fontSize="sm" color="white" truncate>{tag.value}</Text>
+            {/* Usage count */}
+            <Box position="absolute" bottom="1" right="1.5" color="white" borderRadius="lg" px="2" py="1">
+                <Text fontSize="xl" color="white/95" lineHeight="1.2" fontWeight="light">{tag.count}</Text>
             </Box>
-        </Box>
+        </Box >
     )
 }
 

@@ -41,6 +41,13 @@ public interface IAssetService
     Task<bool> UpdateTagsAsync(string id, List<AssetTag> tags);
 
     /// <summary>
+    /// Tags for several assets at once, keyed by asset id. Used by the batch tag
+    /// editor: unlike <see cref="GetAssetDetailAsync"/> it does no thumbnail or
+    /// palette work and needs a single round trip. Unknown ids are omitted.
+    /// </summary>
+    Task<Dictionary<string, List<AssetTag>>> GetTagsForAssetsAsync(IEnumerable<string> ids);
+
+    /// <summary>
     /// Search assets by query string, optionally filtered by folder.
     /// </summary>
     Task<PaginatedResponse<AssetDto>> SearchAsync(string query, int page, int pageSize, string? folder = null);

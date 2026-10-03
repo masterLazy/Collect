@@ -38,6 +38,9 @@ interface TopBarProps {
     /** Gallery layout: natural aspect ratios (masonry) or uniform squares (grid). */
     viewMode?: "masonry" | "grid"
     onViewModeChange?: (mode: "masonry" | "grid") => void
+    /** Batch mode: selection mode is active (cards toggle instead of opening the sidebar). */
+    selectionMode?: boolean
+    onToggleSelectionMode?: () => void
     toaster: CustomToaster
 }
 
@@ -117,6 +120,15 @@ function MoreIcon() {
     )
 }
 
+function SelectIcon() {
+    return (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M9 11l3 3L22 4" />
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        </svg>
+    )
+}
+
 export function TopBar({
     searchQuery,
     onSearchChange,
@@ -147,6 +159,8 @@ export function TopBar({
     onSortChange,
     viewMode = "masonry",
     onViewModeChange,
+    selectionMode,
+    onToggleSelectionMode,
     toaster,
 }: TopBarProps) {
     // Mobile search bar visibility:
@@ -445,6 +459,19 @@ export function TopBar({
                             </Menu.Positioner>
                         </Portal>
                     </Menu.Root>
+
+                    {/* Batch selection toggle (all sizes) */}
+                    <IconButton
+                        size="sm"
+                        flexShrink="0"
+                        variant={selectionMode ? "subtle" : "ghost"}
+                        colorPalette={selectionMode ? "blue" : "gray"}
+                        aria-label={selectionMode ? "Exit selection mode" : "Select assets for batch actions"}
+                        title={selectionMode ? "Exit selection mode" : "Select assets"}
+                        onClick={onToggleSelectionMode}
+                    >
+                        <SelectIcon />
+                    </IconButton>
 
                     {/* Desktop: layout toggle (masonry / grid) */}
                     <HStack
